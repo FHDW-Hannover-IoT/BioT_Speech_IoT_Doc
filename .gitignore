@@ -1,0 +1,8 @@
+/.idea/*
+/.vscode/*
+doc/.asciidoctor/
+doc/.asciidoctor/**
+doc/diag-plantuml-md5-*.png
+doc/diag-plantuml-md5-*.svg
+doc/images/diag-plantuml-md5-*.png
+doc/images/diag-plantuml-md5-*.svg

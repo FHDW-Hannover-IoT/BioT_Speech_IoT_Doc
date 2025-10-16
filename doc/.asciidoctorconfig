@@ -1,0 +1,3 @@
+:imagesdir: images
+:imagesoutdir: {imagesdir}
+:diagram-cachedir: {asciidoctorconfigdir}/.asciidoctor/diagram

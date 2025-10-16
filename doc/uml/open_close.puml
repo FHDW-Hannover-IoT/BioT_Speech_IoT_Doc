@@ -1,0 +1,12 @@
+@startuml
+
+skin rose
+
+state Open
+state Closed
+
+[*] --> Open
+Open --> Closed
+Closed --> [*]
+
+@enduml
