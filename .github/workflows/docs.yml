@@ -17,14 +17,12 @@ concurrency:
 
 jobs:
   build_docs:
-    name: Build docs (HTML & PDF)
     runs-on: ubuntu-latest
     container:
       image: asciidoctor/docker-asciidoctor:1.84
     steps:
       - uses: actions/checkout@v4
 
-      # Speed up diagram redraws across runs (optional)
       - name: Cache asciidoctor-diagram outputs
         uses: actions/cache@v4
         with:
@@ -35,43 +33,42 @@ jobs:
       - name: Build HTML & PDF
         run: |
           set -euo pipefail
-          # HTML -> public/ (images embedded)
+          # HTML -> public/
           asciidoctor \
-            -a data-uri \
-            -a toc=left \
-            -a sectnums \
-            -a reproducible \
-            -a icons=font \
-            -a source-highlighter=Pygments \
-            -a experimental \
+            -a data-uri -a toc=left -a sectnums -a reproducible -a icons=font \
+            -a source-highlighter=Pygments -a experimental \
             -r asciidoctor-diagram \
-            -a imagesdir=images \
-            -a imagesoutdir=.asciidoctor/diagram \
+            -a imagesdir=images -a imagesoutdir=.asciidoctor/diagram \
             -a diagram-cachedir=.asciidoctor/diagram \
-            -D public \
-            -R doc \
-            doc/**/*.adoc
+            -D public -R doc "**/*.adoc"
 
-          # PDF -> build/pdf/*.pdf and copy to public/pdf
+          # PDF -> build/pdf/*.pdf and copy into public/pdf
           mkdir -p build/pdf public/pdf
           asciidoctor-pdf \
             -r asciidoctor-diagram \
-            -a imagesdir=images \
-            -a imagesoutdir=.asciidoctor/diagram \
+            -a imagesdir=images -a imagesoutdir=.asciidoctor/diagram \
             -a diagram-cachedir=.asciidoctor/diagram \
-            -D build/pdf \
-            -R doc \
-            doc/**/*.adoc || true
+            -D build/pdf -R doc "**/*.adoc" || true
           cp -a build/pdf/*.pdf public/pdf/ || true
 
-      - name: Upload build artifacts
+      - name: Prepare _site (flatten so index.html is at root)
+        run: |
+          rm -rf _site
+          mkdir -p _site
+          cp -a public/. _site/      # puts index.html at _site/
+          # (optional) keep PDFs also at /pdf
+          mkdir -p _site/pdf
+          cp -a build/pdf/*.pdf _site/pdf/ || true
+
+      - name: List _site (debug)
+        run: ls -la _site | sed -n '1,120p'
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: site
-          path: |
-            public/**
-            build/pdf/*.pdf
-          if-no-files-found: warn
+          path: _site
+          if-no-files-found: error
 
   deploy_pages:
     needs: build_docs
@@ -82,16 +79,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: site
-          path: public
+          path: _site
 
-      - name: Flatten to _site (index.html at root)
-        run: |
-          rm -rf _site
-          mkdir -p _site
-          # copy contents of ./public into ./_site (not the folder itself)
-          cp -a public/. _site/
-
-      - name: List site root (debug)
+      - name: List _site (debug)
         run: ls -la _site | sed -n '1,120p'
 
       - name: Upload Pages artifact
