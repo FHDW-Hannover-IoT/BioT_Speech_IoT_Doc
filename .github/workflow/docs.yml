@@ -1,0 +1,99 @@
+name: Build & (optional) Pages deploy
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Needed for Pages deploy; safe for normal builds too.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_docs:
+    name: Build docs (HTML & PDF)
+    runs-on: ubuntu-latest
+    container:
+      image: asciidoctor/docker-asciidoctor:1.84
+    steps:
+      - uses: actions/checkout@v4
+
+      # Speed up diagram redraws across runs (optional)
+      - name: Cache asciidoctor-diagram outputs
+        uses: actions/cache@v4
+        with:
+          path: .asciidoctor/diagram
+          key: diagram-${{ hashFiles('doc/**/*.adoc') }}
+          restore-keys: diagram-
+
+      - name: Build HTML & PDF
+        run: |
+          set -euo pipefail
+          # HTML -> public/ (images embedded)
+          asciidoctor \
+            -a data-uri \
+            -a toc=left \
+            -a sectnums \
+            -a reproducible \
+            -a icons=font \
+            -a source-highlighter=Pygments \
+            -a experimental \
+            -r asciidoctor-diagram \
+            -a imagesdir=images \
+            -a imagesoutdir=.asciidoctor/diagram \
+            -a diagram-cachedir=.asciidoctor/diagram \
+            -D public \
+            -R doc \
+            doc/**/*.adoc
+
+          # PDF -> build/pdf/*.pdf and copy to public/pdf
+          mkdir -p build/pdf public/pdf
+          asciidoctor-pdf \
+            -r asciidoctor-diagram \
+            -a imagesdir=images \
+            -a imagesoutdir=.asciidoctor/diagram \
+            -a diagram-cachedir=.asciidoctor/diagram \
+            -D build/pdf \
+            -R doc \
+            doc/**/*.adoc || true
+          cp -a build/pdf/*.pdf public/pdf/ || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: |
+            public/**
+            build/pdf/*.pdf
+          if-no-files-found: warn
+
+  deploy_pages:
+    name: Deploy to GitHub Pages
+    needs: build_docs
+    # Run only on push to the repository's default branch (mirrors your GitLab rule)
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: public
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
