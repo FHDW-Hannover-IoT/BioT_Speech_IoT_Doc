@@ -5,17 +5,17 @@
 :toc: left
 :sectnums:
 
-== 1. Scope
+== Scope
 * Purpose of the project/component
 * Goals & non-goals (short list)
 
-== 2. Context
+== Context
 * System context diagram or short description
 * Key external systems / actors
 
 plantuml::uml/open_close.puml[format=svg]
 
-== 3. Architecture Overview
+== Architecture Overview
 * Main components and their responsibilities
 * Key design decisions (with rationale)
 * Interfaces (APIs, events, DB access)
@@ -34,22 +34,22 @@ void main() {
 }
 ----
 
-== 4. Runtime & Deployment
+== Runtime & Deployment
 * Example flow (one sequence diagram or text description)
 * Deployment view (where it runs: local, server, cloud, container)
 
-== 5. Quality & Constraints
+== Quality & Constraints
 * Main non-functional goals (performance, security, usability)
 * Known constraints (tech stack, standards, hardware)
 
-== 6. How-To (for developers)
+== How-To (for developers)
 * Build & run locally
 * Configure (env vars, settings)
 * Testing basics
 
-== 7. Open Questions / Risks
+== Open Questions / Risks
 * List of things to be clarified or risks to watch
 
-== 8. Appendix
+== Appendix
 * References (tickets, ADRs, external docs, etc.)
 * https://www.fhdw-hannover.de/[FHDW]
