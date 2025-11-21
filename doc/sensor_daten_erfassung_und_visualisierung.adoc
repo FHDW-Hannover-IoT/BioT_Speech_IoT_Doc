@@ -1,0 +1,109 @@
+= Dokumentation: Sensor-Daten-Erfassung und Visualisierung (IoT-App)
+:toc: left
+:toclevels: 3
+:sectnums:
+:doctype: book
+
+Dieses Dokument beschreibt die Kernkomponenten der Anwendung zur Erfassung, Speicherung und Visualisierung von Sensordaten (Beschleunigung, Gyroskop, Magnetfeld) eines Android-Geräts. Die Anwendung verwendet Android Room zur lokalen Datenbankverwaltung und die MPAndroidChart-Bibliothek zur Darstellung der Zeitreihendaten.
+
+plantuml::uml/klassendiagramm.puml[format=svg]
+
+[[section-mainactivity]]
+== `MainActivity` (Steuerung und Live-Erfassung)
+
+Die `MainActivity` dient als zentrale Schnittstelle der Anwendung. Sie ist für die Initialisierung der Sensoren, die kontinuierliche Erfassung der Live-Daten und die Weiterleitung der Messwerte an die Datenbank verantwortlich.
+
+=== 1. Sensor-Konfiguration
+Die Activity initialisiert drei Hauptsensoren und deren Schwellenwerte:
+
+|===
+| Sensor | Typ | Schwellenwert
+| `accelerometer` | `Sensor.TYPE_ACCELEROMETER` | `15`
+| `gyroscope` | `Sensor.TYPE_GYROSCOPE` | `15`
+| `magnetometer` | `Sensor.TYPE_MAGNETIC_FIELD` | `100`
+|===
+
+=== 2. Lebenszyklus-Methoden
+
+|===
+| Methode | Beschreibung
+| `onCreate(Bundle savedInstanceState)` | 1. Setzt das Layout (`R.layout.activity_main`). 2. Initialisiert alle UI-Elemente. 3. Holt den `SensorManager` und die Instanzen für die drei Sensoren. 4. Initialisiert die Datenbank und den `SensorDao`. 5. Setzt Listener für `AccelActivity`, `GyroActivity`, `MagnetActivity` und `EreignisActivity`.
+| `onResume()` | Registriert die `MainActivity` als Listener für alle drei Sensoren (`accelerometer`, `gyroscope`, `magnetometer`) mit der Verzögerung `SensorManager.SENSOR_DELAY_NORMAL`.
+|===
+
+=== 3. `onSensorChanged(SensorEvent event)`
+
+Diese Methode wird bei jeder neuen Messung eines Sensors aufgerufen.
+
+.Ablauf der Datenverarbeitung
+* **UI-Aktualisierung:** Die aktuellen Sensorwerte (`event.values[0-2]`) werden direkt in die entsprechenden `TextViews` geschrieben.
+* **Datenmodell-Erstellung:** Ein neues Datenobjekt (`AccelData`, `GyroData` oder `MagnetData`) wird mit den Messwerten und dem aktuellen `timestamp` erstellt.
+* **Schwellenwert-Überprüfung:** Die absoluten Werte werden gegen den jeweiligen `*EventThreshold` geprüft. Wenn der Schwellenwert überschritten wird, wird ein neues `SensorEreigniss` erstellt, welches eine Benachrichtigung auslöst.
+* **Datenbank-Speicherung:** Das Datenobjekt wird über einen `ExecutorService` des `DB`-Objekts asynchron in die Datenbank eingefügt.
+
+[[section-chartactivity]]
+== `AccelActivity` (Datenvisualisierung)
+
+Die `AccelActivity` ist für die detaillierte Anzeige der Beschleunigungsdaten verantwortlich. Die Logik für die Diagramm-Anzeige wird weitgehend von der abstrakten Basisklasse `BaseChartActivity` geerbt. (Anmerkung: Die Funktionalitäten für Gyroskop und Magnetfeld sind analog aufgebaut).
+
+=== 1. Komponenten und Initialisierung
+
+|===
+| Komponente | Beschreibung
+| `LineChart`s (3x) | `lineChartAccelX`, `lineChartAccelY`, `lineChartAccelZ` zur Darstellung der Achsen.
+| `DatePickerHandler` | Wird verwendet, um Buttons (`xVon`, `xBis`, etc.) mit der Logik zum Öffnen des Datums-Auswahl-Dialogs zu verknüpfen.
+| `loadDataFromDatabase()` | Ruft asynchron alle `AccelData` aus der Datenbank ab.
+| `displayDataInCharts()` | Verarbeitet die abgerufenen Daten, konvertiert sie in `Entry`-Objekte (relative Zeit in Millisekunden) und übergibt sie an die Diagramm-Sets.
+|===
+
+[[section-database]]
+== Datenbank-Schicht
+
+=== 1. Klasse: `DB`
+* **Entities:** Enthält die Entities `AccelData`, `GyroData`, und `MagnetData`.
+* **`databaseWriteExecutor`:** Ein statischer `ExecutorService` mit 4 Threads zur asynchronen Ausführung von Datenbankoperationen, um die UI nicht zu blockieren.
+
+=== 2. Interface: `SensorDao`
+Das Data Access Object (DAO) definiert die Methoden zur Interaktion mit der Datenbank.
+Es bietet `insert`-Methoden für alle drei Daten-Entities und stellt `getAll*Data()`-Methoden bereit, um die vollständigen Zeitreihendaten für jede Sensorart abzurufen, sortiert nach Zeitstempel (`timestamp ASC`).
+
+=== 3. Daten-Entities (`AccelData`, `GyroData`, `MagnetData`)
+Die Entities definieren die Struktur der gespeicherten Sensordaten.
+* **`id`:** `PrimaryKey(autoGenerate = true)` zur eindeutigen Identifizierung des Datensatzes.
+* **`timestamp`:** Speichert den Zeitstempel (`long`) der Messung.
+* **`accelX`, `accelY`, `accelZ`:** Speichern die jeweiligen float-Werte der Sensorachse.
+
+[[section-charts]]
+== Visualisierungs-Schicht
+
+=== 1. Klasse: `BaseChartActivity`
+
+* **`setupChart(LineChart chart, String label, long startTime)`:** Konfiguriert das Erscheinungsbild eines `LineChart`-Objekts (Hintergrund, Achsenfarben, Legende). Setzt optional einen `SecondsValueFormatter` für die X-Achse, falls ein Startzeitpunkt (`startTime > 0`) übergeben wird.
+* **`setData(LineChart chart, ArrayList<Entry> entries, String label, int color)`:** Nimmt die Datenpunkte entgegen, erstellt ein `LineDataSet`, fügt es dem Chart hinzu und aktualisiert die Ansicht (`chart.invalidate()`).
+
+=== 2. Klasse: `SecondsValueFormatter`
+
+Formatiert die X-Achse des Diagramms, um die Zeit seit dem ersten Messpunkt in Sekunden darzustellen. Die Basis ist die `startTime` des ersten Datenbankeintrags.
+
+[[section-events]]
+== Ereignis- und Benachrichtigungs-Schicht
+
+=== 1. Klasse: `SensorEreigniss`
+
+* **Konstruktor:** Erstellt das Ereignis und löst sofort die Methode `createNotification()` aus.
+* **Benachrichtigung:** Die Methode `createNotification` erstellt einen `NotificationChannel` (`eventChannel`) und sendet eine Benachrichtigung über den `NotificationManager` des Android-Systems.
+
+=== 2. Klasse: `EreignisActivity`
+Zeigt eine gefilterte Liste der `SensorEreigniss`-Objekte an.
+* Akzeptiert einen Parameter (`SENSOR_FILTER`) um Events nach Typ (`ACCEL`, `GYRO`, `MAGNET`, `ALL`) zu filtern und den Header entsprechend anzupassen.
+
+=== 3. Adapter: `MyEventAdapter`
+Standard `RecyclerView.Adapter` zur Darstellung der `SensorEreigniss`-Objekte in einer Listenansicht. Die `EventViewHolder` bindet die Felder `sensorType`, `timestamp` und `value` an die entsprechenden `TextViews`.
+
+[[section-utility]]
+== Utility-Klasse
+
+=== 1. Klasse: `DatePickerHandler`
+Stellt eine wiederverwendbare Logik zur Erstellung und Anzeige eines `DatePickerDialog` bereit.
+
+* **`setupButton(final Button button)`:** Erstellt für den übergebenen `Button` einen `DatePickerDialog`, setzt den `OnDateSetListener` (um das Datum auf den Button zu schreiben) und weist den `OnClickListener` zu, um den Dialog anzuzeigen.

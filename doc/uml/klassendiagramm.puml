@@ -1,0 +1,171 @@
+@startuml
+
+skinparam defaultFontName Arial
+skinparam shadowing false
+hide circle
+left to right direction
+
+' ====================================================================
+' STYLES
+' ====================================================================
+skinparam class {
+  BackgroundColor White
+  BorderColor #555555
+}
+skinparam interface {
+  BackgroundColor #DDEEFF
+  BorderColor #5555FF
+}
+
+' ====================================================================
+' MAIN ACTIVITIES & HANDLER
+' ====================================================================
+
+abstract class AppCompatActivity
+abstract class BaseChartActivity {
+    # setupChart(LineChart, String, long)
+    # setData(LineChart, ArrayList<Entry>, String, int)
+}
+
+class MainActivity {
+    - SensorDao sensorDao
+    + SensorManager sensorManager
+    + Sensor accelerometer
+    - Sensor gyroscope
+    - Sensor magnetometer
+    - TextView accelXValue, gyroXValue, magXValue
+    - float accelEventThreshold
+    + onCreate(Bundle)
+    + onResume()
+    + onPause()
+    + onSensorChanged(SensorEvent)
+}
+SensorEventListener <|.. MainActivity
+
+class AccelActivity {
+    - LineChart lineChartAccelX, lineChartAccelY, lineChartAccelZ
+    - long startTime
+    + onCreate(Bundle)
+    - loadDataFromDatabase()
+    - displayDataInCharts(List<AccelData>)
+}
+BaseChartActivity <|-- AccelActivity
+
+class EreignisActivity {
+    - RecyclerView recyclerView
+    - MyEventAdapter adapter
+    - List<SensorEreigniss> filteredEvents
+    + onCreate(Bundle)
+    - loadEventData(String)
+}
+AppCompatActivity <|-- EreignisActivity
+
+class DatePickerHandler {
+    - Context context
+    + DatePickerHandler(Context)
+    + setupButton(Button)
+    - makeDateString(int, int, int) : String
+}
+
+' ====================================================================
+' UTILITY & DATABASE
+' ====================================================================
+
+interface SensorDao <<DAO>> {
+    + insert(AccelData)
+    + insert(GyroData)
+    + insert(MagnetData)
+    + getAllAccelData() : List<AccelData>
+    + getAllGyroData() : List<GyroData>
+    + getAllMagnetData() : List<MagnetData>
+}
+
+abstract class DB <<RoomDatabase>> {
+    + {abstract} sensorDao() : SensorDao
+    + {static} getDatabase(Context) : DB
+    + {static} databaseWriteExecutor
+}
+
+class SecondsValueFormatter <<Formatter>> {
+    - long startTime
+    + SecondsValueFormatter(long)
+    + getFormattedValue(float) : String
+}
+
+' ====================================================================
+' DATA ENTITIES & EVENTS
+' ====================================================================
+
+class AccelData <<Entity>> {
+    + id : int <<PK>>
+    + timestamp : long
+    + accelX, accelY, accelZ : float
+}
+
+class GyroData <<Entity>> {
+    + id : int <<PK>>
+    + timestamp : long
+    + gyroX, gyroY, gyroZ : float
+}
+
+class MagnetData <<Entity>> {
+    + id : int <<PK>>
+    + timestamp : long
+    + magnetX, magnetY, magnetZ : float
+}
+
+class SensorEreigniss {
+    - timestamp : long
+    - sensorType : String
+    - value : float
+    - context : Context
+    + SensorEreigniss(...)
+    + getTimestamp() : long
+    + getSensorType() : String
+    - createNotification(String, String)
+}
+
+class MyEventAdapter <<RecyclerView.Adapter>> {
+    - List<SensorEreigniss> eventList
+    + onBindViewHolder(...)
+    + onCreateViewHolder(...)
+    + getItemCount() : int
+}
+
+' ====================================================================
+' RELATIONSHIPS
+' ====================================================================
+
+' Inheritance
+AppCompatActivity <|-- BaseChartActivity
+AppCompatActivity <|-- MainActivity
+AppCompatActivity <|-- EreignisActivity
+
+' Composition / Association
+DB "1" -- "1" SensorDao : erzeugt >
+MainActivity "1" *-- "1" SensorDao : verwendet
+MainActivity "1" -- "1" DB : {static} holt >
+
+' Data Usage / Persistence
+SensorDao -- AccelData
+SensorDao -- GyroData
+SensorDao -- MagnetData
+
+MainActivity "1" ..> AccelData : erstellt/speichert >
+MainActivity "1" ..> GyroData : erstellt/speichert >
+MainActivity "1" ..> MagnetData : erstellt/speichert >
+
+' Activity/Handler Usage
+AccelActivity "1" *-- "1" DatePickerHandler : kapselt Logik >
+
+' Chart Activity Dependency
+AccelActivity ..> AccelData : lädt Daten >
+AccelActivity ..> SecondsValueFormatter : verwendet für X-Achse >
+BaseChartActivity ..> SecondsValueFormatter : Abhängigkeit >
+
+' Events
+MainActivity "1" ..> SensorEreigniss : erzeugt bei Schwellwert >
+EreignisActivity "1" *-- "1" MyEventAdapter : verwaltet >
+MyEventAdapter "1" *-- "0..*" SensorEreigniss : enthält >
+
+@enduml
