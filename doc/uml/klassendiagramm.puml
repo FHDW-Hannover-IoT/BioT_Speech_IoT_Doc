@@ -5,9 +5,6 @@ skinparam shadowing false
 hide circle
 left to right direction
 
-' ====================================================================
-' STYLES
-' ====================================================================
 skinparam class {
   BackgroundColor White
   BorderColor #555555
@@ -17,9 +14,6 @@ skinparam interface {
   BorderColor #5555FF
 }
 
-' ====================================================================
-' MAIN ACTIVITIES & HANDLER
-' ====================================================================
 
 abstract class AppCompatActivity
 abstract class BaseChartActivity {
@@ -67,10 +61,6 @@ class DatePickerHandler {
     - makeDateString(int, int, int) : String
 }
 
-' ====================================================================
-' UTILITY & DATABASE
-' ====================================================================
-
 interface SensorDao <<DAO>> {
     + insert(AccelData)
     + insert(GyroData)
@@ -92,9 +82,6 @@ class SecondsValueFormatter <<Formatter>> {
     + getFormattedValue(float) : String
 }
 
-' ====================================================================
-' DATA ENTITIES & EVENTS
-' ====================================================================
 
 class AccelData <<Entity>> {
     + id : int <<PK>>
@@ -132,40 +119,12 @@ class MyEventAdapter <<RecyclerView.Adapter>> {
     + getItemCount() : int
 }
 
-' ====================================================================
-' RELATIONSHIPS
-' ====================================================================
-
-' Inheritance
 AppCompatActivity <|-- BaseChartActivity
 AppCompatActivity <|-- MainActivity
 AppCompatActivity <|-- EreignisActivity
 
-' Composition / Association
 DB "1" -- "1" SensorDao : erzeugt >
 MainActivity "1" *-- "1" SensorDao : verwendet
 MainActivity "1" -- "1" DB : {static} holt >
-
-' Data Usage / Persistence
-SensorDao -- AccelData
-SensorDao -- GyroData
-SensorDao -- MagnetData
-
-MainActivity "1" ..> AccelData : erstellt/speichert >
-MainActivity "1" ..> GyroData : erstellt/speichert >
-MainActivity "1" ..> MagnetData : erstellt/speichert >
-
-' Activity/Handler Usage
-AccelActivity "1" *-- "1" DatePickerHandler : kapselt Logik >
-
-' Chart Activity Dependency
-AccelActivity ..> AccelData : lädt Daten >
-AccelActivity ..> SecondsValueFormatter : verwendet für X-Achse >
-BaseChartActivity ..> SecondsValueFormatter : Abhängigkeit >
-
-' Events
-MainActivity "1" ..> SensorEreigniss : erzeugt bei Schwellwert >
-EreignisActivity "1" *-- "1" MyEventAdapter : verwaltet >
-MyEventAdapter "1" *-- "0..*" SensorEreigniss : enthält >
 
 @enduml
