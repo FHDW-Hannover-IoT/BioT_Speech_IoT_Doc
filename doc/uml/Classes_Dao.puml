@@ -1,0 +1,191 @@
+@startuml
+'https://plantuml.com/class-diagram
+'public
+
+abstract RoomDatabase{
+'public methods
+    clearAllTables()
+    close()
+    'compileStatement(sql)
+    'getInvalidationTracker()
+    getOpenHelper()
+    'getQueryExecutor()
+    'getTransactionExecutor()
+    inTransaction()
+    init(Databaseconfiguration)
+    'bool isOpen()
+    query(query, args)
+    'runInTransaction(Runnable)
+
+}
+
+abstract class DB extends RoomDatabase{
+
+    private static volatile DB INSTANCE
+    int NUMBER_OF_THREADS = 4
+    ExecutorService databaseWriteExecutor
+    'Executors.newFixedThreadPool(NUMBER_OF_THREADS);
+
+    INSTANCE getDatabase(final Context context)
+     }
+Interface SensorDao{
+    entity[] entities = <AccelData.class, GyroData.class, MagnetData.class, EreignisData.class>,
+    int version
+    bool exportSchema
+}
+
+'entity accel_data{
+class AccelData{
+int ID
+long timestamp
+float accelX
+float accelY
+float accelZ
+}
+
+'entity gyro_data{
+class GyroData{
+int ID
+__
+long timestamp
+float gyroX
+float gyroY
+float gyroZ
+}
+
+'entity magnet_data{
+class MagnetData{
+int ID
+__
+long timestamp
+float magnetX
+float magnetY
+float magnetZ
+}
+
+'entity ereignis_data{
+class EreignisData{
+int ID
+__
+long timestamp
+String sensorType
+float value
+}
+
+SensorDao -d- AccelData
+SensorDao -d- GyroData
+SensorDao -d- MagnetData
+SensorDao -d- EreignisData
+DB -d-> "1" SensorDao
+/'
+---------------------------------------
+@Database(
+        entities = {AccelData.class, GyroData.class, MagnetData.class, EreignisData.class},
+        version = 2,
+        exportSchema = false)
+public abstract class DB extends RoomDatabase {
+
+    public abstract SensorDao sensorDao();
+
+    private static volatile DB INSTANCE;
+    private static final int NUMBER_OF_THREADS = 4;
+    static final ExecutorService databaseWriteExecutor =
+            Executors.newFixedThreadPool(NUMBER_OF_THREADS);
+
+    static DB getDatabase(final Context context) {
+        if (INSTANCE == null) {
+            synchronized (DB.class) {
+                if (INSTANCE == null) {
+                    INSTANCE =
+                            Room.databaseBuilder(
+                                            context.getApplicationContext(),
+                                            DB.class,
+                                            "sensor_database")
+                                    .fallbackToDestructiveMigration()
+                                    .build();
+                }
+            }
+        }
+        return INSTANCE;
+    }
+}
+---------------------------------
+abstract AbstractCollection
+interface List
+interface Collection
+
+List <|-- AbstractList
+Collection <|-- AbstractCollection
+
+Collection <|- List
+AbstractCollection <|- AbstractList
+AbstractList <|-- ArrayList
+
+class ArrayList {
+Object[] elementData
+size()
+}
+
+enum TimeUnit {
+DAYS
+HOURS
+MINUTES
+}'/
+
+/'
+@Entity(tableName = "accel_data")
+public class AccelData {
+
+    @PrimaryKey(autoGenerate = true)
+    public int id;
+
+    public long timestamp;
+    public float accelX;
+    public float accelY;
+    public float accelZ;
+}
+
+----------------------------------
+
+@Entity(tableName = "gyro_data")
+public class GyroData {
+
+    @PrimaryKey(autoGenerate = true)
+    public int id;
+
+    public float gyroX;
+    public float gyroY;
+    public float gyroZ;
+    public long timestamp;
+}
+------------------------------------
+
+@Entity(tableName = "magnet_data")
+public class MagnetData {
+
+    @PrimaryKey(autoGenerate = true)
+    public int id;
+
+    public float magnetX;
+    public float magnetY;
+    public float magnetZ;
+    public long timestamp;
+}
+
+----------------------------------------------
+
+@Entity(tableName = "ereignis_data")
+public class EreignisData {
+
+    @PrimaryKey(autoGenerate = true)
+    public int id;
+
+    public long timestamp;
+    public String sensorType;
+    public float value;
+}
+
+---------------------------
+'/
+
+@enduml

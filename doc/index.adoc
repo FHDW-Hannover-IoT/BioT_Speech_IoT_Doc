@@ -1,55 +1,78 @@
-= {project-name} – Software Component Detailed Design (SWCDD)
+= Biot Android App – Software Component Detailed Design (SWCDD)
 :revnumber: 0.1
 :revdate: {docdate}
-:author: {your-name}
+:author: {Leonie Abels, Lilli Anding}
 :toc: left
 :sectnums:
 
-== Scope
-* Purpose of the project/component
-* Goals & non-goals (short list)
+==  Scope
+* Building an android app, which
+* receives sensor Data from an IoT-Device
+* displays the data in a reasonable/helpful way
+* detects and displays/warns if certain events occur
+* sends the data and events to a database
 
-== Context
-* System context diagram or short description
-* Key external systems / actors
+==  Context
+Component Diagram:
 
-plantuml::uml/open_close.puml[format=svg]
+plantuml::uml/build.puml[format=svg]
 
-== Architecture Overview
-* Main components and their responsibilities
-* Key design decisions (with rationale)
-* Interfaces (APIs, events, DB access)
+==  Architecture Overview
 
-[[fig-arch]]
-.System architecture
-image::sys_architecture.png[width=600]
+=== Main components and their responsibilities
 
-See <<fig-arch>> for details.
 
-Example code:
-[source,java]
-----
-void main() {
-  println("Hello World");
-}
-----
 
-== Runtime & Deployment
+=== Key design decisions (with rationale)
+
+
+
+=== Interfaces
+==== APIs
+* MQTT
+* Blutooth (not yet implemented)
+
+==== Events
+==== DBAccess
+
+plantuml::uml/Classes_Dao.puml[format=svg]
+
+==== Classdiagramm
+
+plantuml::uml/classes.puml[formal=svg]
+
+
+== 4. Runtime & Deployment
 * Example flow (one sequence diagram or text description)
 * Deployment view (where it runs: local, server, cloud, container)
 
-== Quality & Constraints
+== 5. Quality & Constraints
 * Main non-functional goals (performance, security, usability)
 * Known constraints (tech stack, standards, hardware)
 
-== How-To (for developers)
-* Build & run locally
-* Configure (env vars, settings)
-* Testing basics
+== 6. How-To (for developers)
 
-== Open Questions / Risks
+=== Build & run locally
+
+* download app folder from git
+(https://github.com/FHDW-Hannover-IoT/BioT_Speech_IoT_App.git) (click [ main v ] )
+* configure virtual device (we used a Pixel 8a)
+(Device Manager/ Add a new Device / Create Virtual Device/ Pixel 8a/ Start (Play Button))
+* run main class MainActivity
+(Path: app/kotlin+java/com.fhdw.biot.speech.iot/MainActivity.java,
+start (PlayButton) first time can take 1 minute or so)
+* Android App symbol will be added to the start screen and will open automatically
+
+=== Configure (env vars, settings)
+
+Threadanzahl
+DB.java, Zeile 18: private static final int NUMBER_OF_THREADS = 4
+
+=== Testing basics
+
+== 7. Open Questions / Risks
 * List of things to be clarified or risks to watch
 
-== Appendix
+== 8. Appendix
 * References (tickets, ADRs, external docs, etc.)
 * https://www.fhdw-hannover.de/[FHDW]
