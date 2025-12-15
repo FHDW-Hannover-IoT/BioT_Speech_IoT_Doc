@@ -25,11 +25,21 @@ plantuml::uml/build.puml[format=svg]
 
 === Key design decisions (with rationale)
 
-
+|===
+| Decision | Rationale
+| Using Room & LiveData | Ensures the user interface (chart views) automatically updates whenever new data is written to the database or when a filter is changed.
+| Modular Visualization (BaseChartActivity) | Code reusability. Chart setup logic is centralized, reducing duplication and simplifying maintenance across all detailed sensor views.
+| Dynamic Observer Management | In MainGraphActivity, persistent LiveData observers (currentAccelLiveData, etc.) are actively removed and re-registered when a new filter is applied. This prevents multiple competing observers from simultaneously attempting to update the chart with different data ranges.
+| Vector Magnitude Calculation | The overall sensor intensity (Sum) is calculated using the Euclidean norm ($\sqrt{X^2 + Y^2 + Z^2}$) rather than simple summation.
+|===
 
 === Interfaces
 ==== APIs
+* Android Notification Manager: Used by SensorEreigniss to issue threshold warnings.
 * MQTT
+
+plantuml::uml/mqqt.puml[formal=svg]
+
 * Blutooth (not yet implemented)
 
 ==== Events
@@ -44,11 +54,25 @@ plantuml::uml/classes.puml[formal=svg]
 
 == 4. Runtime & Deployment
 * Example flow (one sequence diagram or text description)
-* Deployment view (where it runs: local, server, cloud, container)
+
+plantuml::uml/manuelChartFiltering.puml[format=svg]
+
+The application is deployed as a standard Android APK und runs locally on the user's mobile  device.
+All data persistence und visualization processing are performed client-side on the device.
+No external server or cloud is required for core functionality.
 
 == 5. Quality & Constraints
-* Main non-functional goals (performance, security, usability)
-* Known constraints (tech stack, standards, hardware)
+|===
+| Goal | Strategy
+| Performance (Data Ingestion) | Use of DB.databaseWriteExecutor ensures high-frequency sensor data insertion happens off the Main Thread, preventing UI freezes.
+| Performance (Filtering) | Database queries are optimized using WHERE clauses on the indexed timestamp column. Dynamic observer management prevents conflicting asynchronous updates.
+| Usability (Reactivity) | LiveData ensures charts and data streams update automatically and smoothly, reducing perceived latency for the user.
+| Usability (Consistency) | BaseChartActivity and DatePickerHandler enforce consistent styling and interaction across the application's filtering interface.
+|===
+
+1. Tech Stack Dependence: Strong dependency on Android OS, Java, AndroidX libraries (Room, LiveData), and the external MPAndroidChart library.
+2. Hardware Dependency: The core function of the app requires an Android device.
+
 
 == 6. How-To (for developers)
 
@@ -65,8 +89,7 @@ start (PlayButton) first time can take 1 minute or so)
 
 === Configure (env vars, settings)
 
-Threadanzahl
-DB.java, Zeile 18: private static final int NUMBER_OF_THREADS = 4
+Thread Count for Database Writes: The number of threads used for asynchronous database operations is configured in DB.java.
 
 === Testing basics
 

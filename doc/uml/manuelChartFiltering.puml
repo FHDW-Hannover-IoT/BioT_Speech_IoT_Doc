@@ -1,0 +1,73 @@
+@startuml
+skinparam style strictuml
+skinparam sequenceMessageAlign center
+autonumber
+
+actor "User" as User
+participant "MainGraphActivity" as Activity
+participant "DatePickerHandler" as Handler
+participant "SensorDao" as Dao
+participant "LiveData" as LiveData
+participant "LineChart" as Chart
+
+title Sequence: Manual Chart Filtering in MainGraphActivity
+
+group User Action
+    User -> Activity: Clicks xVonButton
+    Activity -> Handler: Trigger Date Picker
+    User -> Handler: Selects Date
+    Handler --> Activity: Returns selected dateFromCalendar
+end
+
+group Filter Trigger
+    activate Activity
+    Activity -> Activity: updateChartsWithDateFilter()
+    activate Activity
+
+    group Observer Removal
+        Activity -> LiveData: removeObservers(this)
+        note right: Stops active updates from\nprevious queries
+    end
+
+    group Query Creation
+        Activity -> Dao: getAccelDataBetween(startTime, endTime)
+        activate Dao
+        Dao --> Activity: returns new LiveData instance
+        deactivate Dao
+    end
+
+    group New Observer Registration
+        Activity -> LiveData: currentAccelLiveData.observe(this, callback)
+    end
+
+    deactivate Activity
+    deactivate Activity
+end
+
+... Asynchronous DB Fetch by Room ...
+
+group DB Response & UI Update
+    LiveData -> Activity: onChanged(List<AccelData>)
+    activate Activity
+    note right: Room delivers filtered data
+
+    group Data Processing
+        Activity -> Activity: initializeAccelDataSets(data)
+        note right: Maps DB entities to\nChart Entry objects
+    end
+
+    group UI Update
+        Activity -> Activity: updateAccelChart()
+        activate Activity
+        note right: Checks checkboxes (X, Y, Z)\nand builds LineData
+        Activity -> Chart: setData(data)
+        Activity -> Chart: invalidate()
+        deactivate Activity
+    end
+
+    deactivate Activity
+end
+
+note right of LiveData: Observer remains active for\nReal-Time Updates within time window
+
+@enduml
