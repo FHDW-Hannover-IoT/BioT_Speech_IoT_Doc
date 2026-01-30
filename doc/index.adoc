@@ -8,6 +8,7 @@
 == Scope
 * Purpose of the project/component
 * Goals & non-goals (short list)
+* How-To run the work
 
 == Context
 * System context diagram or short description
