@@ -1,13 +1,16 @@
-name: Build & (optional) Pages deploy
+name: Build & (optional) Pages deploy (+ Release assets)
 
 on:
   push:
     branches: ["**"]
   pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
 
-# Needed for Pages deploy; safe for normal builds too.
+# Needed for Pages + Release asset upload
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -33,7 +36,6 @@ jobs:
       - name: Build HTML & PDF
         run: |
           set -euo pipefail
-          # HTML -> public/
           asciidoctor \
             -a data-uri -a toc=left -a sectnums -a reproducible -a icons=font \
             -a source-highlighter=Pygments -a experimental \
@@ -42,7 +44,6 @@ jobs:
             -a diagram-cachedir=.asciidoctor/diagram \
             -D public -R doc "**/*.adoc"
 
-          # PDF -> build/pdf/*.pdf and copy into public/pdf
           mkdir -p build/pdf public/pdf
           asciidoctor-pdf \
             -r asciidoctor-diagram \
@@ -55,13 +56,9 @@ jobs:
         run: |
           rm -rf _site
           mkdir -p _site
-          cp -a public/. _site/      # puts index.html at _site/
-          # (optional) keep PDFs also at /pdf
+          cp -a public/. _site/
           mkdir -p _site/pdf
           cp -a build/pdf/*.pdf _site/pdf/ || true
-
-      - name: List _site (debug)
-        run: ls -la _site | sed -n '1,120p'
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -81,9 +78,6 @@ jobs:
           name: site
           path: _site
 
-      - name: List _site (debug)
-        run: ls -la _site | sed -n '1,120p'
-
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -95,3 +89,28 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
+
+  upload_release_assets:
+    needs: build_docs
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: _site
+
+      - name: Package docs
+        run: |
+          set -euo pipefail
+          # One neat asset that contains HTML + PDFs
+          zip -r docs-site.zip _site
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            docs-site.zip
