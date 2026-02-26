@@ -5,18 +5,10 @@
 :toc: left
 :sectnums:
 
-==  Scope
-* Building an android app, which
-* receives sensor Data from an IoT-Device
-* displays the data in a reasonable/helpful way
-* detects and displays/warns if certain events occur
-* sends the data and events to a database
-* How to set up the MQTT environment (Mosquitto broker on PC)
-* How to run the Android app on physical phone or emulator
-* What the application does
-* Architecture and responsibilities of:
-* MainActivity
-* MqttHandler
+== Scope
+* Purpose of the project/component
+* Goals & non-goals (short list)
+* How-To run the work
 
 
 ==  Context
