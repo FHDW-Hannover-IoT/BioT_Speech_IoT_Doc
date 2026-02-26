@@ -1,20 +1,3 @@
-Lilli
-7lilli7
-Online
-
-LeonieAbels — 26.11.2025 12:11
-Hey Lilli,
-Nur zur Info, ich hatte gestern mit der restlichen Integrationsprojektgruppe ne spontane Besprechung nach den Vorträgen. Osama hat klar gemacht, das er sehr frustriert ist über die ungleiche Menge an Arbeit die manche in der Gruppe in das Projekt stecken, dass er nicht mehr zu Gruppenterminen kommt und er bereit wäre, das ganze zu Klinger zu eskalieren.
-Ich hab ihm gesagt, dass ich das nachvollziehen kann und ihn gebeten, das noch nicht zu tun.
-Ich hab mich mit Mattis und Benedikt für heute verabredet und wir sehen was wir tun können, um die Lücke an Workload zwischen den Gruppenmitgliedern ein bisschen zu schließen.
-
-Falls du Vorschläge hast, welche Sachen noch erledigt werden müssen oder welche Aufgaben wir dir abnehmen können, sag gern Bescheid. Du hast dich zwar nicht beschwert, aber ich stimme Osama absolut zu, dass ihr beide bei weitem am meisten beigetragen habt bisher. Ansonsten sehen wir uns morgen in der Vorlesung 🙂
-Lilli — 26.11.2025 12:23
-Hey,
-also es wäre super, wenn Mattis das Thema mit den Ereignissen fertig stellen könnte. Das hatte ja meine ich noch nicht funktioniert. Wir sollte auf jeden Fall einen Punkt erreichen, bei dem alle Testfälle durchlaufen. Mattis und Benedikt sollten jetzt wo sie Ubi und das Kino erledigt haben, wieder mehr Zeit haben.
-
-Es gab ja auch noch den Punkt zum Anlegen von neuen Ereignissen. Da müssten wir nochmal schauen, wie man das umsetzten könnte
-LeonieAbels — 13:52
 @startuml
 
 participant app as "Android App"

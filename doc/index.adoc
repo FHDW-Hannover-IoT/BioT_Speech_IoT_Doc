@@ -93,6 +93,29 @@ Thread Count for Database Writes: The number of threads used for asynchronous da
 
 === Testing basics
 
+Class AndererUnitTest
+
+@Before
+
+Creates Context for the notification
+
+* Simulate a Notification Manager to avoid the need for hardware simulation, based on the context of the integrated Notification Service in Android.
+
+testDefineSensorEvent
+
+* Creates a fixed sensor type, a value, an ID, and an axis for the notification. Additionally, use the current time. Finally, create an event with these results. A notification should be triggered immediately after the sensor event is defined, as the class is defined accordingly.
+Afterwards, the various entered values should be checked for correctness.
+
+testCreateNotification
+
+* Actively creates a notification based on Sensortype, ID, axis and a pre-defined value. The context is simulated. With Verify it is checked if a notification channel has been created. Additionally, the value, ID, axis and importance (Default) will be checked. If these values are correct, then the data for the notification will be too.
+Afterwards it will be checked it a notification is sent.
+
+DBSchreibenTest
+
+* Creates a new event for the database containing timestamp, Sensortyp: MAGNET, Ausrichtung: X, „magEvent_“ and context. The databaseWriteExecutor is executed and the event added.
+
+
 == 7. Open Questions / Risks
 * List of things to be clarified or risks to watch
 
