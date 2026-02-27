@@ -1,0 +1,124 @@
+@startuml
+'https://plantuml.com/class-diagram
+'public
+
+interface SensorDao
+
+class MainActivity extends AppCompactActivity{
+    sensorManager : SensorManager
+    accelerometer : Sensor
+    gyroscope : Sensor
+    magnetometer : Sensor
+}
+
+MainActivity -> "1" SensorDao
+
+abstract class AppCompactActivity {
+    void onCreate(savedInstanceState : Bundle)
+}
+
+abstract class BaseChartActivity extends AppCompactActivity{
+    void setupChart(chart : LineChart, label : String,
+    startTime : long)
+    void setData(chart : LineChart, entries : ArrayList<Entry>,
+    label : String, color : int)
+}
+
+class AccelActivity extends BaseChartActivity{
+    void setupDatePickers()
+    void updateChartsWithDateFilter(
+    void displayDateInCharts()
+}
+
+class GyroActivity extends BaseChartActivity{
+    void setupDatePickers()
+    void updateChartsWithDateFilter(
+    void displayDateInCharts()
+}
+
+class MagnetActivity extends BaseChartActivity {
+    void setupDatePickers()
+    void updateChartsWithDateFilter(
+    void displayDateInCharts()
+}
+
+class EreignisActivity extends AppCompactActivity {
+    recyclerView : RecyclerView
+    filteredEvents : List<EreignisData>
+    boolean : isSortAscending
+    currentSortKey : String= "TIMESTAMP"
+
+    void loadEventData(filter : String)
+    void sortEvents(sortKey : String)
+}
+
+EreignisActivity -> "1" MyEventAdapter
+
+class NewEreignisActivity extends AppCompactActivity {
+    recyclerView : RecyclerView
+}
+
+NewEreignisActivity -> "1" EditableEventAdapter
+NewEreignisActivity -> "*" EditableSensorEvent
+
+class MyEventAdapter {
+    eventList : List<EreignisData>
+}
+
+
+class DatepickerHandler {
+    context : Context
+    void setupButton()
+    String makeDateTimeString()
+    void updateButtonText(button
+    :Button, cal : Calender)
+}
+
+class DouglasPeukerAlg {
+}
+
+class EditableEventAdapter {
+    nextId : long = 0
+
+    long addEmptyEvent()
+    void deleteEvent(position : int)
+}
+
+class EditableSensorEvent {
+    id : long
+    sensorType : String
+    eventType : String
+    thresholdValue : String
+}
+
+EditableEventAdapter -> "*" EditableSensorEvent
+
+abstract class ValueFormatter {
+}
+
+class SecondsValueFormatter extends ValueFormatter {
+    startTime : long
+
+    String getFormattedValue (
+    value : float)
+}
+
+class SensorEreignis {
+    timestamp : long
+    sensorType : String
+    value : float
+    id : String
+    context : Context
+    axis : char
+
+    void showNotification(context : Context, String title,
+    String message, Intent intent, int reqCode)
+}
+
+class MainGraphActivity extends BaseChartActivity {
+    void setupDatePickers()
+    void updateChartsWithDateFilter(
+    void displayDateInCharts()
+    }
+
+@enduml

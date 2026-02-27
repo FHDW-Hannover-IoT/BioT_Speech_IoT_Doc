@@ -1,0 +1,40 @@
+@startuml
+'https://plantuml.com/component-diagram
+
+skinparam component {
+  'FontSize 13
+  BackgroundColor<<Android-App>> Pink
+  BorderColor<<Apache>> #FF6655
+  'FontName Courier
+  BorderColor black
+  'BackgroundColor gold
+  'ArrowFontName Impact
+  'ArrowColor #FF6655
+  'ArrowFontColor #777777
+}
+
+component "IoT-Device" {
+  [IoT-Sensor]
+}
+
+component "Smartphone" {
+  [Android-App] #Lime
+  [Internal Memory]
+}
+
+
+database "DB" {
+  folder "Tables" {
+    [sensordata]
+    [eventdata]
+  }
+}
+
+[IoT-Sensor] .> () Blutooth : use
+            Blutooth -d- [Android-App]
+[Android-App] -> [Internal Memory]
+[Internal Memory] -> [Android-App]
+[Android-App]  .> () MQTT : use
+              MQTT - [Tables]
+
+@enduml

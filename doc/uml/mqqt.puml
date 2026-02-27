@@ -1,0 +1,63 @@
+@startuml
+
+participant app as "Android App"
+participant bro as "MQTT Broker"
+participant iot as "IoT Device"
+
+
+activate iot
+
+
+iot -> bro : connect (clean start,)
+'request problem information, will, will delay interval?
+activate bro
+note right
+"User presses button on iot device"
+end note
+bro -> iot : connack
+'reason string
+iot -> bro : subscribe (modus)
+iot -> bro : subscribe (Eventlist)
+iot -> bro : subscribe (Sensorlist)
+
+
+
+app -> bro : connect
+activate app
+note left
+"User opens app"
+end note
+bro -> app : connack
+app -> bro : publish (Sensorlist: list)
+'qos 0: alt most once deliv, qos 1: at least once deliv.,qos 2: exactly once
+bro -> iot : publish (Sensorlist: list)
+app -> bro : publish (Eventlist: list)
+bro -> iot : publish (Eventlist: list)
+app -> bro : subscribe (sensorMag)
+app -> bro : subscribe (sensorAcc)
+app -> bro : subscribe (sensorGyro)
+app -> bro : subscribe (Events)
+app -> bro : publish (modus: I)
+bro -> iot : publish (modus: I)
+iot -> bro : publish (sensorMag: data)
+note right
+Sensors will be read and send continuously
+end note
+bro -> app : publish (sensorMag: data)
+iot -> bro : publish (sensorAcc: data)
+bro -> app : publish (sensorAcc: data)
+iot -> bro : publish (sensorGyro: data)
+bro -> app : publish (sensorGyro: data)
+iot -> bro : publish (Event: data)
+bro -> app : publish (Event: data)
+...
+app -> bro : publish (Modus: E)
+bro -> iot : publish (Modus: E)
+note right
+Sensordaten werden weiterhin auf SD-Karte gespeichert,
+aber nicht weiter gepublisht
+end note
+iot -> bro : publish (Event: data)
+
+
+@enduml
