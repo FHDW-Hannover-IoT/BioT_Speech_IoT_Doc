@@ -248,7 +248,7 @@ plantuml::uml/Classes_Dao.puml[format=svg]
 plantuml::uml/classes.puml[formal=svg]
 
 
-== 4. Runtime & Deployment
+==  Runtime & Deployment
 * Example flow (one sequence diagram or text description)
 
 plantuml::uml/manuelChartFiltering.puml[format=svg]
@@ -295,7 +295,7 @@ SocketTimeoutException: failed to connect
 ----
 * Which always indicates network/firewall/IP mismatch.
 
-== 5. Quality & Constraints
+== Quality & Constraints
 |===
 | Goal | Strategy
 | Performance (Data Ingestion) | Use of DB.databaseWriteExecutor ensures high-frequency sensor data insertion happens off the Main Thread, preventing UI freezes.
@@ -308,7 +308,7 @@ SocketTimeoutException: failed to connect
 2. Hardware Dependency: The core function of the app requires an Android device.
 
 
-== 6. How-To (for developers)
+==  How-To (for developers)
 
 === Build & run locally
 
@@ -449,9 +449,9 @@ net start mosquito
 ----
 •	If using a laptop, disable VPNs (they rewrite routes)
 
-== 7. Open Questions / Risks
+==  Open Questions / Risks
 * List of things to be clarified or risks to watch
 
-== 8. Appendix
+==  Appendix
 * References (tickets, ADRs, external docs, etc.)
 * https://www.fhdw-hannover.de/[FHDW]
