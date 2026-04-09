@@ -1,0 +1,49 @@
+[options="header"]
+|===
+|Command |App actions
+
+|Start calibration
+|1) App shows information on how to stand/place the sensors. +
+2) Countdown starts. +
+3) App signals sensors to set null points. +
+4) App sets epsilon values. +
+5) App shows whether calibration was successful.
+
+|Show (sensor)
+|App shows the graphs of the requested sensor.
+
+|Set epsilon (sensor) (axis?)
+|1) App sets epsilon value for the requested sensor and axis. +
+2) App updates graph data.
+
+|Show events
+|App shows a list of all created events.
+
+|Show events (sensor)
+|App shows a list of all created events for the requested sensor.
+
+|Create event (sensor) (threshold)
+|App creates a new event for the requested sensor with the given threshold value.
+
+|Show notifications (timeframe?)
+|App shows a list of notifications (e.g., today, yesterday, or specific date).
+
+|Show notifications (sensor) (timeframe?)
+|App shows a list of notifications for the requested sensor and timeframe.
+
+|Set mode to (mode)
+|1) Autark: App tells sensors to stop sending data (Power saving). +
+2) Supervision: App tells sensors to send all data; shows homescreen. +
+3) Event: Sensors only send data when thresholds are met; App triggers notification (sound, vibration, popup). +
+4) Identification: Sensors send all data; App forwards data to the database.
+
+|Get mode
+|App announces and shows the current mode (Autark, Supervision, Event, Identification).
+
+|Tell value (sensor) (axis?)
+|App announces and shows the current value(s) for the requested sensor and axis.
+
+|Show all sensors / Show homescreen
+|App shows current values of all sensors and axes.
+|===
+
