@@ -6,8 +6,9 @@
 |1) App shows information on how to stand/place the sensors. +
 2) Countdown starts. +
 3) App signals sensors to set null points. +
-4) App sets epsilon values. +
-5) App shows whether calibration was successful.
+4) repeat 1 to 3 for all sensors +
+5) App sets epsilon values. +
+6) App shows whether calibration was successful.
 
 |Show (sensor)
 |App shows the graphs of the requested sensor.
