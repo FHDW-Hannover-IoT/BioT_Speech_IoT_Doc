@@ -1,0 +1,1007 @@
+= BioT Sensor Assistant — LLM Backend Reference
+:revnumber: 2.0
+:revdate: {docdate}
+:author: BioT Speech IoT Team
+:toc: left
+:toc-title: Contents
+:sectnums:
+:sectanchors:
+:icons: font
+
+[abstract]
+This document is the technical reference for the Python backend of the BioT
+Speech IoT system. It explains the architecture, every Python module, the
+MCP tool catalogue, the MQTT subscriber, the LLM provider abstraction, the
+JSON action contract the Android app depends on, all configuration, how
+to run and deploy the server, and how to diagnose every common failure
+mode.
+
+If you are looking for the higher-level project context (sensors used,
+research goal, supervisor) see `BioT_Speech_IoT_Doc/doc/index.adoc`.
+If you are looking for the Android client, see `BioT_Speech_IoT_App/README.adoc`.
+
+== Scope
+
+* **Purpose:** Host the LLM that answers conversational queries from the
+  Android voice pipeline. Maintain a server-side mirror of the live MQTT
+  sensor stream in SQLite so the LLM can answer questions about historical
+  data. Expose a small HTTP surface the Android app can hit from the LAN.
+* **Goals:** Provider-agnostic LLM (swap Anthropic for OpenAI by editing
+  one line in `.env`); deterministic JSON responses the Android app can
+  parse; clean separation between the agent, the tool layer (MCP), and
+  the data layer (SQLite); simple lifecycle that starts everything from
+  one command.
+* **Non-goals:** Not a multi-tenant service. Not authenticated. Not
+  designed for high concurrency — single-process FastAPI with one
+  background MQTT thread is sufficient for the project's load.
+
+== Context
+
+This Python backend is one of three projects in the BioT Speech IoT system:
+
+[options="header",cols="1,3"]
+|===
+| Project | Role
+
+| `BioT_Speech_IoT_App`
+| Android client. Owns the on-phone Room database for live charts. Runs the
+  voice pipeline. Forwards LLM-bound transcripts to this server.
+
+| `BioT_Speech_IoT_LLM_App` (this one)
+| Python FastAPI server hosting the LLM agent and an MCP tool server.
+  Mirrors live MQTT data into a separate SQLite database the LLM can query.
+
+| `BioT_Speech_IoT_Doc`
+| AsciiDoc documentation including the canonical voice command dictionary.
+|===
+
+[#architecture]
+== Architecture Overview
+
+[plantuml,format=svg]
+----
+@startuml
+skinparam componentStyle rectangle
+
+[Android app] --> [FastAPI /chat] : POST { "message": ... }
+[FastAPI /chat] --> [SensorAgent] : run(message)
+[SensorAgent] --> [LLMProvider] : run + tools
+[LLMProvider] --> [Anthropic / OpenAI / DeepSeek / Gemini] : HTTPS
+[SensorAgent] --> [MCP Server] : POST /tools/call
+[MCP Server] --> [SQLite]      : SELECT (read-only)
+
+[ESP8266] --> [Mosquitto] : Sensor/*
+[Mosquitto] --> [MqttSubscriber] : Sensor/*
+[MqttSubscriber] --> [SQLite] : INSERT
+@enduml
+----
+
+If your AsciiDoc renderer doesn't have PlantUML, here it is in ASCII:
+
+----
+                                ┌──────────────────────────────┐
+                                │  Android app                 │
+                                │   - Voice pipeline           │
+                                │   - QUERY_* / UNKNOWN  ──────┼──┐
+                                └──────────────────────────────┘  │
+                                                                  │ POST /chat
+                                                                  ▼
+                  ┌────────────────────────────────────────────────────┐
+                  │  app/main.py  (FastAPI, port 8001)                 │
+                  │   ├── /health                                       │
+                  │   └── /chat ─► SensorAgent.run()                    │
+                  │                  │                                  │
+                  │                  ▼                                  │
+                  │            app/agent.py  (provider-agnostic)        │
+                  └──────┬─────────────────────┬───────────────────────┘
+                         │ HTTPS               │ HTTP /tools/call
+                         ▼                     ▼
+       ┌───────────────────────────┐   ┌───────────────────────────┐
+       │ Anthropic / OpenAI /      │   │ mcp_server/                │
+       │ DeepSeek / Gemini API     │   │ sensor_mcp_server.py       │
+       │ (chosen by LLM_PROVIDER)  │   │ FastMCP, port 8002         │
+       └───────────────────────────┘   └────────────┬───────────────┘
+                                                    │ SELECT
+                                                    ▼
+                                       ┌────────────────────────────┐
+                                       │ data/sensor_database.db    │
+                                       │  (SQLite, read-only by MCP)│
+                                       └────────────▲───────────────┘
+                                                    │ INSERT
+                              ┌─────────────────────┴─────────────────┐
+                              │ mcp_server/mqtt_subscriber.py         │
+                              │ (background thread inside FastAPI)    │
+                              └─────────────────▲─────────────────────┘
+                                                │ subscribes Sensor/*
+                                                │
+                              ┌─────────────────┴─────────────────────┐
+                              │ Mosquitto MQTT broker                 │
+                              └─────────────────▲─────────────────────┘
+                                                │ publishes Sensor/*
+                              ┌─────────────────┴─────────────────────┐
+                              │ ESP8266 + KY-037 + MPU-6050 + A3144   │
+                              └───────────────────────────────────────┘
+----
+
+=== Why this shape
+
+[options="header",cols="2,5"]
+|===
+| Decision | Rationale
+
+| Separate MCP server (subprocess), not in-process tool calls
+| The MCP server speaks the standard Model Context Protocol over Streamable
+  HTTP. Same code can be moved to a different host without changing the
+  agent. Today both run on `localhost`; tomorrow `MCP_SERVER_URL` can point
+  at a remote box.
+
+| Provider-agnostic agent
+| The `LLMProvider` abstract base lets us add Mistral, Cohere, etc. with
+  one new file. Provider choice is `.env`-only; no code paths change in
+  `agent.py` based on the provider.
+
+| MQTT subscriber inside the FastAPI process (not a separate service)
+| The subscriber is a single background thread writing to SQLite. Splitting
+  it out would add a process boundary for zero benefit at this scale.
+  When this scales beyond one machine the subscriber would become its own
+  systemd unit, but until then in-process is simpler.
+
+| Two SQLite databases (Room on phone + this one)
+| The Android Room DB is on the phone in private app storage; the MCP
+  server can't reach it. The two DBs subscribe to the same MQTT firehose
+  with identical schemas. The "extra" cost is one background thread that
+  was running anyway.
+|===
+
+[#database_split]
+== Database Architecture
+
+The BioT system has **two SQLite databases on purpose**. Documenting this
+here so it doesn't look like a bug.
+
+[options="header",cols="1,3,2,2,2"]
+|===
+| DB | Location | Written by | Read by | Purpose
+
+| Room (on phone)
+| `/data/data/com.fhdw.biot.speech.iot/databases/sensor_database`
+| Android `MainActivity` from MQTT messages
+| All chart Activities via `LiveData`
+| Reactive UI, offline charts, date filters
+
+| Server SQLite
+| `data/sensor_database.db`
+| `mqtt_subscriber.py` from MQTT messages
+| MCP tools (read-only)
+| LLM historical queries, anomaly analysis
+|===
+
+Both databases use **identical schemas** so the agent's SQL queries work
+the same way against either one. They both subscribe to the same MQTT
+topics — they just write to different files.
+
+=== Why not one DB?
+
+* Room lives inside the Android app sandbox. The MCP server can't reach it
+  without `adb pull` (which is slow, requires a USB connection, and
+  doesn't update in real time).
+* Stripping Room out of the Android app would mean rewriting every chart
+  Activity (`AccelActivity`, `GyroActivity`, `MagnetActivity`,
+  `MainGraphActivity`) to fetch from HTTP endpoints, and would break
+  offline charts.
+* The "extra" cost of two DBs is one background thread (`mqtt_subscriber`)
+  that was running anyway. Disk overhead is negligible compared to the
+  MQTT message volume the system handles.
+
+== Module Reference
+
+=== Top-level layout
+
+----
+LLM_App/
+├── app/
+│   ├── main.py              FastAPI entry point + lifespan
+│   ├── agent.py             SensorAgent — provider-agnostic
+│   ├── database.py          SQLite helpers (used outside MCP if needed)
+│   ├── logger.py            Centralised logging
+│   └── providers/
+│       ├── base.py          LLMProvider abstract base
+│       ├── anthropic.py     Claude implementation
+│       ├── openai.py        GPT implementation
+│       ├── deepseek.py      DeepSeek implementation
+│       ├── gemini.py        Gemini implementation
+│       └── __init__.py      create_provider() factory
+├── mcp_server/
+│   ├── sensor_mcp_server.py FastMCP server with sensor tools
+│   └── mqtt_subscriber.py   Background MQTT → SQLite writer
+├── config/
+│   └── settings.py          Settings class (reads .env)
+├── docs/
+│   └── LLM_USE_CASES.md     Use case spec + JSON action contract
+├── data/
+│   └── sensor_database.db   Created on first MQTT message
+├── logs/
+│   └── biot.log             Rotating log (5 MB × 3)
+├── .env                     Real credentials (gitignored)
+├── .env.example             Safe template (committed)
+├── pyproject.toml
+└── README.adoc              ← you are here
+----
+
+[#main_module]
+=== `app/main.py` — FastAPI entry point
+
+The single startup script. Run it with:
+
+[source,bash]
+----
+uv run python -m app.main
+----
+
+==== Lifespan responsibilities
+
+The FastAPI lifespan context manager performs three steps in order:
+
+. **Spawn the MCP server** as a subprocess (`mcp_server/sensor_mcp_server.py`).
+  Wait up to 18 seconds for it to bind on `MCP_SERVER_PORT` (default 8002).
+  If the subprocess crashes during startup, the FastAPI app aborts with a
+  clear error — the subprocess output is not redirected, so the Python
+  traceback prints directly to your terminal.
+
+. **Build the `SensorAgent`**, which wires the configured `LLMProvider`
+  and points its tool dispatcher at the MCP server's URL.
+
+. **Start the MQTT subscriber** in a background daemon thread.
+
+On shutdown the subscriber is stopped, the MCP subprocess is terminated,
+and the lifespan exits cleanly.
+
+==== Endpoints
+
+[options="header",cols="1,2,3"]
+|===
+| Method | Path | Purpose
+
+| `GET`  | `/health` | Liveness — returns `{"status": "ok"}`
+| `POST` | `/chat`   | Send a natural-language message; receive a JSON action
+|===
+
+==== `/chat` request
+
+[source,json]
+----
+{ "message": "What is the latest gyro Y value?" }
+----
+
+==== `/chat` response (envelope)
+
+[source,json]
+----
+{ "reply": "{ \"action\": \"answer\", \"tts\": \"Gyro axis Y is 0.45...\" }" }
+----
+
+The `reply` field is a string containing the JSON the LLM produced. The
+Android `LlmQueryHandler.postChat` extracts the inner JSON and passes it
+to `LlmAction.parse`. See <<json_contract>> for the full schema.
+
+[#agent_module]
+=== `app/agent.py` — `SensorAgent`
+
+==== What it does
+
+* Holds the system prompt that defines the agent's behaviour and the JSON
+  action schema.
+* Holds the tool catalogue (provider-agnostic descriptions of every
+  callable tool).
+* Implements `_dispatch_tool(name, inputs)` which forwards every tool call
+  to the MCP server over HTTP (`POST /tools/call`).
+* Delegates the actual provider conversation to whichever `LLMProvider`
+  the factory chose.
+
+==== System prompt highlights
+
+The system prompt instructs the LLM to:
+
+* Always use tools to fetch real data — never invent or guess sensor values.
+* Return one JSON action per response, matching the schema in
+  <<json_contract>>.
+* Use the fallback prompt
+  `"Sorry, I didn't catch that. Could you repeat your question?"`
+  whenever the user's intent is unclear (Issue #11 acceptance criterion).
+* Distinguish transmission mode (`Control/Mode`: STREAM/BURST/AVERAGE)
+  from operating mode (`Control/OperatingMode`:
+  AUTARK/SUPERVISION/EVENT/IDENTIFICATION).
+* Treat the .adoc commands "Start calibration" and "Set epsilon" as not
+  yet implemented and respond with a polite redirect.
+
+==== Tool catalogue
+
+The agent exposes seven tools to the LLM. Each is described in the
+provider-agnostic format that `LLMProvider.format_tools` translates per
+provider.
+
+[options="header",cols="2,3"]
+|===
+| Tool | Purpose
+
+| `get_latest_sensor_data(sensor)`
+| Most recent row from `accel_data` / `gyro_data` / `magnet_data`.
+
+| `get_value_for_axis(sensor, axis)`
+| Most recent value for a single axis (X/Y/Z). Implements the .adoc
+  "Tell value (sensor) (axis)" command.
+
+| `get_sensor_history(sensor, minutes)`
+| Up to 50 rows from the time window, plus per-column min/max/avg/count
+  summary statistics for trend or anomaly questions.
+
+| `get_db_schema()`
+| `CREATE TABLE` statements for every table, plus a plain-language
+  description of what each column means.
+
+| `get_event_log(limit)`
+| Recent threshold events from `ereignis_data`, plus today's count.
+
+| `get_row_count(table)`
+| Per-table row count and timestamp of the latest entry. Useful for
+  "is there any data?" sanity checks.
+
+| `execute_query(sql)`
+| Read-only `SELECT` for anything not covered above (custom aggregations,
+  joins, complex date ranges). Non-`SELECT` statements are rejected.
+|===
+
+[#mcp_module]
+=== `mcp_server/sensor_mcp_server.py` — MCP tool server
+
+`FastMCP`-based MCP server exposing the seven tools above. Runs as a
+subprocess of `app/main.py` on `MCP_SERVER_PORT` (default 8002) using the
+**Streamable HTTP transport** so the agent can reach it identically whether
+it runs locally or remotely.
+
+==== Why Streamable HTTP, not stdio
+
+Stdio transport requires the MCP server to be a child of the agent process.
+That works for a single-machine demo but rules out:
+
+* Running the agent and the MCP server on different hosts.
+* Restarting the agent without restarting the MCP server.
+* Having multiple agents share one MCP server.
+
+Streamable HTTP supports all three. It costs one extra TCP port and
+nothing else.
+
+==== Sensor name resolution
+
+The `_SENSOR_TABLE` mapping accepts both German and English names so the
+LLM can pass through the user's phrasing without transformation:
+
+[options="header",cols="2,3"]
+|===
+| Accepts | Resolves to
+| `accel`, `accelerometer`, `bewegung`, `beschleunigung` | `accel_data`
+| `gyro`, `gyroscope`, `gyroskop`                        | `gyro_data`
+| `magnet`, `magnetometer`, `hall`, `magnetfeld`         | `magnet_data`
+| `ereignis`, `event`, `events`                          | `ereignis_data`
+|===
+
+==== Read-only by design
+
+The MCP server opens SQLite with `mode=ro`. Every read connection is
+opened and closed per tool call, which is safe alongside the subscriber's
+write connections.
+
+==== Adding a new tool
+
+Two edits:
+
+. Add an `@mcp.tool()` function in `sensor_mcp_server.py`.
+. Add a matching entry to `_TOOLS` in `app/agent.py` so the LLM knows it
+  exists.
+
+That's it — restart the FastAPI server, and the MCP subprocess restarts
+with it.
+
+[#mqtt_subscriber_module]
+=== `mcp_server/mqtt_subscriber.py` — live data ingest
+
+==== Responsibilities
+
+* Connect to Mosquitto using `paho-mqtt`.
+* Subscribe to all sensor topics (`Sensor/Bewegung`, `Sensor/Gyro`,
+  `Sensor/Magnet`, `Sensor/Mic`).
+* Parse incoming payloads.
+* Insert each reading into the matching SQLite table — schema identical
+  to the Android Room DB so the same SQL works against both.
+* Reconnect automatically on connection loss (5-second backoff).
+
+==== Schema
+
+Schema mirrors the Android Room database exactly. Table DDLs
+created on first run if missing:
+
+[source,sql]
+----
+CREATE TABLE IF NOT EXISTS accel_data (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,    -- Unix milliseconds
+    accelX    REAL    NOT NULL,    -- g-force
+    accelY    REAL    NOT NULL,
+    accelZ    REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS gyro_data (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    gyroX     REAL    NOT NULL,    -- degrees/second
+    gyroY     REAL    NOT NULL,
+    gyroZ     REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS magnet_data (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp INTEGER NOT NULL,
+    magnetX   REAL    NOT NULL,
+    magnetY   REAL    NOT NULL,
+    magnetZ   REAL    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ereignis_data (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp  INTEGER NOT NULL,
+    sensorType TEXT    NOT NULL,    -- 'ACCEL' | 'GYRO' | 'MAGNET'
+    value      REAL    NOT NULL,
+    axis       TEXT    NOT NULL     -- 'X' | 'Y' | 'Z'
+);
+----
+
+==== Burst payload handling
+
+Burst mode payloads concatenate multiple `x,y,z` triplets:
+
+----
+1.23,-0.45,9.81,1.24,-0.46,9.80
+----
+
+The subscriber splits in groups of three and inserts one row per triplet,
+so the same code path handles both Stream (one triplet per message) and
+Burst modes.
+
+==== Why `Sensor/Mic` is not persisted
+
+The microphone publishes at ~50 Hz with a single integer per message.
+That is too noisy for the LLM to do anything useful with. The Android
+app shows the live value in a `TextView` but doesn't store it either.
+If you want sound history, add a column to a new `mic_data` table and
+parse the topic in `_on_message`.
+
+[#providers_module]
+=== `app/providers/` — LLM provider abstraction
+
+==== `base.py`
+
+`LLMProvider` is an abstract base class with two methods:
+
+[source,python]
+----
+class LLMProvider(ABC):
+    @abstractmethod
+    def run(self, user_message: str, tools: list, system_prompt: str) -> str:
+        ...
+
+    @abstractmethod
+    def format_tools(self, tools: list) -> list:
+        ...
+----
+
+`run()` runs the full agentic loop — sending the message with tool
+definitions, executing any tool calls the model requests via the dispatch
+callback, and returning the final plain-text response. `format_tools`
+converts our neutral tool definitions into whatever shape the provider's
+SDK expects.
+
+==== `__init__.py` — factory
+
+`create_provider(provider_name, ...)` resolves the `LLM_PROVIDER` value
+from `.env` and returns the matching subclass. Imports are lazy so a
+project running on Anthropic doesn't need the `openai` package installed.
+
+==== Adding a new provider
+
+. Create `app/providers/<name>.py` subclassing `LLMProvider`.
+. Add the name to `_SUPPORTED` in `app/providers/__init__.py`.
+. Add the import + return branch in `create_provider()`.
+. Add the default model in `config/settings.py` `_DEFAULT_MODELS`.
+
+No other files change. Switch with a one-line `.env` edit:
+
+[source,properties]
+----
+LLM_PROVIDER=mistral
+LLM_API_KEY=...
+----
+
+[#settings_module]
+=== `config/settings.py` — configuration
+
+The `Settings` class is the single source of truth for runtime
+configuration. Every property is a lazy read of an environment variable
+with a sensible default. The module is imported as `settings` (lowercase
+singleton).
+
+[options="header",cols="2,3,2"]
+|===
+| Property | Source env var | Default
+
+| `llm_provider`     | `LLM_PROVIDER`     | `anthropic`
+| `llm_api_key`      | `LLM_API_KEY`      | (required, no default)
+| `llm_model`        | `LLM_MODEL`        | per-provider default
+| `sqlite_db_path`   | `SQLITE_DB_PATH`   | `<project>/data/sensor_database.db`
+| `mcp_server_port`  | `MCP_SERVER_PORT`  | `8002`
+| `mcp_server_url`   | `MCP_SERVER_URL`   | `http://localhost:{mcp_server_port}/mcp`
+| `mqtt_broker_host` | `MQTT_BROKER_HOST` | `127.0.0.1`
+| `mqtt_broker_port` | `MQTT_BROKER_PORT` | `1883`
+| `server_host`      | `SERVER_HOST`      | `0.0.0.0`
+| `server_port`      | `SERVER_PORT`      | `8001`
+|===
+
+If `LLM_PROVIDER` is set to an unsupported value or `LLM_API_KEY` is
+missing, the process exits at startup with a clear message rather than
+failing later inside an SDK call.
+
+[#json_contract]
+== JSON Action Contract
+
+This is the **single source of truth** for what the Android
+`LlmQueryHandler` will accept. If you change any field name here you must
+update `LlmAction.parse` on the Android side.
+
+=== Schema
+
+[source,json]
+----
+{
+  "action":  "answer | navigate | mqtt_publish | apply_filter | clear_filter",
+  "tts":     "Text to speak aloud via Android TtsManager (always present)",
+
+  // Only when action = "navigate":
+  "screen":  "MainActivity | AccelActivity | GyroActivity | MagnetActivity
+              | MainGraphActivity | EreignisActivity | SettingsActivity",
+
+  // Only when action = "mqtt_publish":
+  "topic":   "Control/Mode | Control/OperatingMode",
+  "payload": "STREAM | BURST | AVERAGE | AUTARK | SUPERVISION | EVENT | IDENTIFICATION",
+
+  // Only when action = "apply_filter":
+  "minutes": 10
+}
+----
+
+=== Action types in detail
+
+==== `answer`
+
+Pure data answer; the Android side speaks `tts` and does nothing else.
+
+[source,json]
+----
+{
+  "action": "answer",
+  "tts": "The latest accelerometer reading is X 0.12g, Y -0.04g, Z 9.81g, recorded 2 seconds ago."
+}
+----
+
+==== `navigate`
+
+Open a specific Activity in the Android app. `screen` must be one of the
+seven Activity class names listed in the schema; anything else is logged
+and ignored.
+
+[source,json]
+----
+{
+  "action": "navigate",
+  "screen": "GyroActivity",
+  "tts": "Opening Gyroscope"
+}
+----
+
+==== `mqtt_publish`
+
+Send a control message to the ESP8266 via the broker. Always retained.
+Valid `(topic, payload)` pairs:
+
+[options="header",cols="2,3"]
+|===
+| `topic` | Allowed `payload` values
+| `Control/Mode`          | `STREAM`, `BURST`, `AVERAGE`
+| `Control/OperatingMode` | `AUTARK`, `SUPERVISION`, `EVENT`, `IDENTIFICATION`
+|===
+
+[source,json]
+----
+{
+  "action": "mqtt_publish",
+  "topic": "Control/OperatingMode",
+  "payload": "SUPERVISION",
+  "tts": "Supervision mode activated"
+}
+----
+
+==== `apply_filter` / `clear_filter`
+
+Apply a sliding time-window filter on the currently visible chart, or
+clear it. `minutes` is the window size; common values are 5, 10, 30, 60,
+1440 (24 h).
+
+[source,json]
+----
+{
+  "action": "apply_filter",
+  "minutes": 10,
+  "tts": "Showing the last ten minutes"
+}
+----
+
+=== Parser tolerance (Android side)
+
+`LlmAction.parse(raw)` is robust to:
+
+* JSON wrapped in markdown fences (` ```json ... ``` `)
+* JSON preceded or followed by chatty prose
+* Missing optional fields (extracted as `null` / `0`)
+* Plain prose with no JSON at all (treated as `ANSWER` with the prose as
+  `tts`)
+* Malformed JSON (treated as `ANSWER` with the prose as `tts`)
+* Unknown action types (treated as `ANSWER`, forward-compatible)
+
+If `tts` is empty or missing, the Android side speaks the Issue #11
+fallback prompt: "Sorry, I didn't catch that. Could you repeat your question?"
+
+== Configuration
+
+=== `.env` reference
+
+See `.env.example` for the canonical template. Copy to `.env` and fill in
+your values — `.env` is gitignored.
+
+[options="header",cols="2,1,3"]
+|===
+| Variable | Required | Notes
+
+| `LLM_PROVIDER` | yes
+| One of: `anthropic`, `openai`, `deepseek`, `gemini`.
+
+| `LLM_API_KEY`  | yes
+| API key for the chosen provider.
+
+| `LLM_MODEL`    | no
+| Provider-specific model identifier. Default is sensible per provider.
+
+| `SQLITE_DB_PATH` | no
+| Absolute path to the server-side SQLite DB. Defaults to
+  `<project>/data/sensor_database.db`.
+
+| `SERVER_HOST`  | no
+| FastAPI bind host. Default `0.0.0.0` so phones on the LAN can reach it.
+
+| `SERVER_PORT`  | no
+| FastAPI bind port. Default `8001`.
+
+| `MCP_SERVER_PORT` | no
+| Port the MCP subprocess binds. Default `8002`.
+
+| `MCP_SERVER_URL` | no
+| Full URL the agent uses to call MCP tools. Default
+  `http://localhost:{MCP_SERVER_PORT}/mcp`. Override to deploy MCP on a
+  different host.
+
+| `MQTT_BROKER_HOST` | no
+| Mosquitto host. `127.0.0.1` if everything runs on the same machine, the
+  broker's LAN IP otherwise.
+
+| `MQTT_BROKER_PORT` | no
+| Mosquitto port. Default `1883`.
+|===
+
+=== Provider defaults
+
+[options="header",cols="2,2,2"]
+|===
+| Provider     | Default model        | Get key
+| `anthropic`  | `claude-sonnet-4-6`  | https://console.anthropic.com
+| `openai`     | `gpt-4.1`            | https://platform.openai.com
+| `deepseek`   | `deepseek-chat`      | https://platform.deepseek.com
+| `gemini`     | `gemini-2.0-flash`   | https://aistudio.google.com/apikey
+|===
+
+== Build & Run
+
+=== Prerequisites
+
+* Python 3.10+
+* `uv` (Astral's package manager) — install:
++
+[source,powershell]
+----
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+----
+* A running Mosquitto broker (see the App README for setup)
+* An API key from one of the supported providers
+
+=== First run
+
+[source,powershell]
+----
+cd C:\Users\Arun\Documents\School\BioT_Speech_IoT_LLM_App
+
+# Create venv and install dependencies
+uv venv
+.venv\Scripts\Activate.ps1
+uv sync
+
+# Configure
+copy .env.example .env
+#   then edit .env and set LLM_API_KEY
+
+# Verify Mosquitto is running
+sc query mosquitto
+
+# Start the FastAPI server
+uv run python -m app.main
+----
+
+Successful startup looks like:
+
+----
+INFO  | biot.app.main         | Starting BioT Sensor Assistant — Settings(provider='anthropic', model='claude-sonnet-4-6', ...)
+INFO  | biot.app.main         | Starting MCP sensor server on port 8002
+INFO  | biot.app.main         | MCP server ready at http://localhost:8002/mcp
+INFO  | biot.app.agent        | SensorAgent ready
+INFO  | biot.app.main         | Agent ready (provider=anthropic, model=claude-sonnet-4-6, mcp=http://localhost:8002/mcp)
+INFO  | biot.mcp_server.mqtt_subscriber | SensorMqttSubscriber started in background thread
+INFO  | biot.mcp_server.mqtt_subscriber | Connected to MQTT broker — subscribing to sensor topics
+INFO  | biot.app.main         | MQTT subscriber running (broker=127.0.0.1:1883)
+INFO  | uvicorn.error         | Application startup complete.
+INFO  | uvicorn.error         | Uvicorn running on http://0.0.0.0:8001
+----
+
+=== Smoke test
+
+[source,powershell]
+----
+curl.exe -X POST http://127.0.0.1:8001/chat `
+  -H "Content-Type: application/json" `
+  -d '{ "message": "How many gyro readings are in the database?" }'
+----
+
+Expected response shape:
+
+[source,json]
+----
+{ "reply": "{ \"action\": \"answer\", \"tts\": \"There are 1,234 gyro readings, the most recent 2 seconds ago.\" }" }
+----
+
+== Operations
+
+=== Watching logs
+
+The `app/logger.py` module configures a centralised logger that writes to
+both the console and a rotating file at `logs/biot.log` (5 MB × 3
+backups). To watch the file live:
+
+[source,powershell]
+----
+Get-Content logs\biot.log -Wait -Tail 50
+----
+
+=== Inspecting the server-side DB
+
+[source,bash]
+----
+sqlite3 data/sensor_database.db
+sqlite> .tables
+sqlite> SELECT COUNT(*) FROM accel_data;
+sqlite> SELECT * FROM gyro_data ORDER BY timestamp DESC LIMIT 5;
+----
+
+=== Manually testing an MCP tool
+
+The MCP server speaks JSON over the `POST /tools/call` endpoint:
+
+[source,bash]
+----
+curl -X POST http://localhost:8002/tools/call \
+     -H "Content-Type: application/json" \
+     -d '{"name": "get_row_count", "arguments": {"table": "all"}}'
+----
+
+You should see a `content` array containing a text block with row counts
+and recency for every table.
+
+=== Testing without the Android app
+
+You can talk to the FastAPI server with `curl` or HTTPie directly:
+
+[source,bash]
+----
+curl -X POST http://127.0.0.1:8001/chat \
+     -H "Content-Type: application/json" \
+     -d '{"message": "Tell me the gyro X value"}'
+
+curl -X POST http://127.0.0.1:8001/chat \
+     -H "Content-Type: application/json" \
+     -d '{"message": "Switch to burst mode"}'
+
+curl -X POST http://127.0.0.1:8001/chat \
+     -H "Content-Type: application/json" \
+     -d '{"message": "Show me the last 10 minutes of accel data and tell me if anything looks unusual"}'
+----
+
+If you want to feed the JSON action result into anything programmatically,
+parse the outer `reply` field then parse the inner JSON it contains.
+
+== Deployment Notes
+
+The current setup is single-machine, single-process. To deploy to a server:
+
+[options="header",cols="2,3"]
+|===
+| Concern | Approach
+
+| Process supervision
+| Run with `systemd` / `supervisord` / Docker. The lifespan handles
+  spawning the MCP subprocess; you supervise the FastAPI process only.
+
+| Public exposure
+| Front the FastAPI server with a reverse proxy (Caddy or nginx) and
+  terminate TLS there. Update the Android app's `biot.llmHostPhone` and
+  use port 443.
+
+| Authentication
+| Add an API key check on `POST /chat`. Generate a token, store it in
+  Android `BuildConfig`, send as `Authorization: Bearer <token>`.
+
+| Multiple LLM providers in parallel
+| The current factory picks one. Refactor `SensorAgent` to accept a
+  provider per request (e.g. by route) if you need A/B comparisons.
+
+| Concurrent requests
+| Uvicorn defaults to single-worker. For higher concurrency switch to
+  `uvicorn --workers N` and ensure the MQTT subscriber + MCP server
+  are still single-instance (start them outside the workers).
+
+| Database persistence across restarts
+| The `data/` directory should be on a persistent volume. SQLite is
+  write-locked while the subscriber holds a connection — back up via
+  the SQLite online backup API or by stopping the service briefly.
+|===
+
+== Troubleshooting
+
+[options="header",cols="2,2,3"]
+|===
+| Symptom | Likely cause | Fix
+
+| `MCP server unreachable at http://localhost:8002/mcp` in agent logs
+| The subprocess crashed during startup
+| Check terminal output above for the Python traceback — usually a missing
+  module (`uv sync` again) or a port collision
+
+| `RuntimeError: MCP server failed to start (exit code N)`
+| Same as above — the subprocess died too quickly to be probed
+| As above. Run `uv run python -m mcp_server.sensor_mcp_server` standalone
+  to reproduce
+
+| `Database file does not exist` from a tool call
+| The MQTT subscriber hasn't received any messages yet
+| Confirm Mosquitto is running, the ESP8266 is publishing, and
+  `MQTT_BROKER_HOST` matches the broker's IP
+
+| `/chat` returns 503 "agent is not ready"
+| FastAPI started but `LLM_API_KEY` was empty or invalid
+| Set the key in `.env` and restart
+
+| Logs show `execute_query` being called repeatedly with weird SQL
+| The model is hallucinating column names
+| Run the query manually with `sqlite3` to check the schema, then improve
+  the system prompt to mention the columns explicitly
+
+| Agent always returns plain prose, never JSON
+| The model is ignoring the system prompt's JSON requirement
+| Lower the temperature in the provider class; or rephrase the system
+  prompt to put the JSON requirement at the top
+
+| Port 8001 in use
+| Another process bound to the FastAPI port
+| Change `SERVER_PORT` in `.env`
+
+| Port 8002 in use
+| Stale MCP server from a previous crashed run
+| `taskkill /IM python.exe` (Windows) or `pkill -f sensor_mcp_server` (Linux)
+
+| MQTT subscriber never receives messages
+| Wrong `MQTT_BROKER_HOST` or broker not on `1883`
+| `mosquitto_sub -h <host> -t "#" -v` to confirm reachability outside
+  the LLM_App
+|===
+
+== Quality & Constraints
+
+[options="header",cols="2,3"]
+|===
+| Goal | Strategy
+
+| Provider lock-in is a one-line change
+| `LLMProvider` ABC + factory; all SDK-specific code lives in
+  `app/providers/<name>.py`.
+
+| Tools can be moved to a different host without code changes
+| MCP server speaks Streamable HTTP; agent reaches it via `MCP_SERVER_URL`
+  from `.env`.
+
+| LLM contract is testable without an LLM
+| `docs/LLM_USE_CASES.md` is the source of truth; Android side parses with
+  a pure function (`LlmAction.parse`) that can be unit-tested with hand-
+  crafted JSON fixtures.
+
+| Database access never blocks the event loop
+| MCP tools open per-call connections; subscriber runs in its own daemon
+  thread; FastAPI handlers never call `sqlite3` directly.
+
+| Sensible defaults — no `.env` editing needed for local dev (except API key)
+| `Settings` properties all default to localhost values that match a
+  freshly-installed Mosquitto on the same machine.
+|===
+
+Constraints to be aware of:
+
+* SQLite is single-writer. The subscriber holds short-lived write
+  connections; if you ever add another writer, switch to PostgreSQL or
+  put the subscriber behind a queue.
+* `uvicorn --reload` works for development but the lifespan respawns the
+  MCP subprocess on every code change — use it sparingly to avoid port
+  thrashing.
+* Provider SDKs are imported lazily, so a fresh `uv sync` only installs
+  what's listed in `pyproject.toml`. If you switch providers and the
+  import fails, add the SDK to `pyproject.toml` and re-sync.
+
+== Security
+
+The current setup is not production-grade. If you ever expose this beyond
+your LAN:
+
+[options="header",cols="2,3"]
+|===
+| Risk | Mitigation
+
+| `/chat` accepts any client
+| Add an `X-API-Key` header check; generate the token, store it in Android
+  `BuildConfig`, send from `LlmQueryHandler.postChat`.
+
+| Anonymous MQTT
+| Set `allow_anonymous false` in `mosquitto.conf`, configure
+  `password_file`, update Mosquitto credentials in `mqtt_subscriber.py` and
+  in the Android `MqttHandler`.
+
+| Plain-text everything
+| Front the FastAPI server with TLS-terminating reverse proxy (Caddy is
+  the easiest); switch MQTT to port 8883 with certs.
+
+| API keys committed to `.env`
+| `.env` is gitignored, but rotate any key that has ever been in a
+  committed file. Use `.env.example` for sharing the variable layout.
+|===
+
+== References
+
+* `BioT_Speech_IoT_App/README.adoc` — Android client companion
+* `BioT_Speech_IoT_Doc/doc/index.adoc` — high-level project documentation
+* `BioT_Speech_IoT_Doc/doc/content/command-dictionary.adoc` — canonical
+  voice command list
+* `docs/LLM_USE_CASES.md` — JSON action contract spec
+* https://modelcontextprotocol.io/[Model Context Protocol]
+* https://github.com/modelcontextprotocol/python-sdk[MCP Python SDK (FastMCP)]
+* https://fastapi.tiangolo.com/[FastAPI]
+* https://docs.astral.sh/uv/[uv documentation]
+* https://www.fhdw-hannover.de[FHDW Hannover]
