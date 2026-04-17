@@ -1,0 +1,69 @@
+@startuml
+' ER-Diagramm Formatierung
+hide circle
+skinparam linetype ortho
+
+entity "accel_data" as accel {
+  * id : int <<PK>> <<auto>>
+  --
+  timestamp : long
+  accelX : float
+  accelY : float
+  accelZ : float
+}
+
+entity "gyro_data" as gyro {
+  * id : int <<PK>> <<auto>>
+  --
+  timestamp : long
+  gyroX : float
+  gyroY : float
+  gyroZ : float
+}
+
+entity "magnet_data" as magnet {
+  * id : int <<PK>> <<auto>>
+  --
+  timestamp : long
+  magnetX : float
+  magnetY : float
+  magnetZ : float
+}
+
+entity "ereignis_data" as ereignis {
+  * id : int <<PK>> <<auto>>
+  --
+  timestamp : long
+  sensorType : String
+  value : float
+  axis : char
+}
+
+entity "knownSensors" as knownSensors {
+  * sensorID : int <<PK>> <<auto>>
+  --
+  sensorName : String
+}
+
+entity "sensor (ValueSensor)" as valuesensor {
+  * PrimeID : int <<PK>> <<auto>>
+  --
+  BewegungX : float
+  BewegungY : float
+  BewegungZ : float
+  GyroX : float
+  GyroY : float
+  GyroZ : float
+  Zeit : String
+}
+
+entity "ereignis_type" {
+    * PrimeID : int <<PK>> <<auto>>
+    --
+    ereignisName : String
+    sensorType : Sensor
+    ereignisThreshold : int
+}
+
+
+@enduml
