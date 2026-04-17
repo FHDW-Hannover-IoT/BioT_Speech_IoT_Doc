@@ -1,0 +1,32 @@
+= Architecture Evaluation: Database Location
+
+== 1. Local on the Smartphone
+The database (Room/SQLite) resides directly on the user's Android device. The app subscribes to the MQTT broker, receives live data streams, and writes them straight to local storage.
+
+=== Pros
+* **Maximum Performance (Low Latency):** Loading data for graphs takes mere milliseconds. Zooming and filtering are instantaneous because there is no network overhead.
+* **Offline Capability:** Once the data is saved on the phone, the user can analyze historical graphs even offline.
+* **Privacy by Design:** Sensor data never leaves the user's device.
+* **No Server Costs:** No costs for cloud hosting or maintain backend infrastructure.
+
+=== Cons
+* **Battery Drain & Backgrounding Constraints:** To prevent data gaps, the app must run constantly in the background to listen to the MQTT broker. Android OS frequently kills these background processes to save battery life, leading to incomplete data.
+* **Limited Storage Capacity:** Smartphones have restricted storage. High-frequency sensor data will need a lot of storages, requiring to regularly compress old data.
+* **Risk of Data Loss:** If the phone breaks, is lost, or the app is uninstalled, all historical data is permanently destroyed.
+
+== 2. Central Server
+Data flows from the sensors via the MQTT broker directly into a central, remote database. The Android app fetches data via an API only when requested.
+
+=== Pros
+* **Much more Storage:** It is possible to store and analyze datasets spanning months or years without worrying about the user's device storage limits.
+* **High Reliability:** The server listens to the MQTT broker all the time. The app only needs to be active when the user wants to view the data. There are no missing gaps due to battery-saving features.
+* **Offloading Compute Power:** The Douglas-Peucker reduction algorithm can run directly on the server. The server then sends only the simplified data points to the app, making the mobile application extremely lightweight and fast.
+* **MCP & AI Integration:** By attaching an MCP server to this database, the structured data can securely be exposed to AI agents.
+
+=== Cons
+* **Internet Dependency:** The app cannot display historical graphs without a stable and active internet connection.
+* **Noticeable Latency:** Panning and zooming through large datasets might feel sluggish compared to local storage, as new data batches must be fetched over the network continually.
+* **Ongoing Costs & Maintenance:** Requires renting server space, managing security, configuring backups, and developing/maintaining a backend API.
+
+== Conclusion
+The database should be hosted on a separate server that provides data to LLMs via an integrated MCP server. This approach enables comprehensive long-term data analysis, ensures higher data security, and allows for accessibility across multiple sources.
