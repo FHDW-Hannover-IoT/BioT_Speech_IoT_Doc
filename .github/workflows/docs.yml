@@ -24,10 +24,10 @@ jobs:
     container:
       image: asciidoctor/docker-asciidoctor:1.84
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache asciidoctor-diagram outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .asciidoctor/diagram
           key: diagram-${{ hashFiles('doc/**/*.adoc') }}
@@ -61,7 +61,7 @@ jobs:
           cp -a build/pdf/*.pdf _site/pdf/ || true
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: site
           path: _site
