@@ -61,7 +61,6 @@ The hardware sits behind the broker:
 
 ----
 ESP8266 NodeMCU
-   ├─ KY-037 microphone     → topic Sensor/Mic
    ├─ MPU-6050 accel/gyro   → topics Sensor/Bewegung, Sensor/Gyro
    └─ A3144 hall sensor     → topic Sensor/Magnet
         │
@@ -74,6 +73,9 @@ ESP8266 NodeMCU
  Android app             LLM_App's MQTT subscriber
  (this project)          (subscribes & writes server-side SQLite)
 ----
+
+NOTE: The KY-037 microphone hardware sensor is not part of this system. Voice input
+uses the Android phone's built-in microphone via Android SpeechRecognizer.
 
 == Architecture Overview
 
@@ -102,7 +104,7 @@ between layers so each layer is testable in isolation.
 | `database` (Room entities, DAOs, executor)
 
 | **Configuration & DI**
-| `config` (`AppConfig`), `di` (`AppContainer`)
+| `config` (`AppConfig`, `AppContainer`, `BiotApplication`, `LanguageManager`)
 |===
 
 === Key design decisions
@@ -150,13 +152,14 @@ between layers so each layer is testable in isolation.
 ESP8266 → Mosquitto → MqttHandler.messageArrived
                           │
                           ▼
-                MainActivity.handleMovement / handleGyro / handleMagnet / handleMic
+                MainActivity.handleMovement / handleGyro / handleMagnet
                           │
             ┌─────────────┴──────────────┐
             ▼                            ▼
-    Update TextViews             DB.databaseWriteExecutor.execute(
-    on UI thread                     () -> sensorDao.insert(...) )
-                                          │
+    Update TextViews         SensorRepository.insertAccel/Gyro/Magnet()
+    on UI thread                          │
+                                   DbContext.execute_write()
+                                          │  (transaction-wrapped, thread-safe)
                                           ▼
                                 Room DB → LiveData observers
                                           → AccelActivity / GyroActivity / ...
@@ -453,10 +456,18 @@ All SELECTs return `LiveData<List<...>>` so chart Activities update
 automatically. Date-range queries (`getAccelDataBetween` etc.) use
 indexed `WHERE timestamp BETWEEN ?` clauses.
 
-==== `DB.databaseWriteExecutor`
+==== `DbContext`
 
-A fixed thread pool used for all INSERTs. Keeps high-frequency MQTT writes
-off the UI thread. Configurable in `DB.java`.
+Wraps Room's `runInTransaction()`. All writes go through `DbContext` so every
+insert is properly transaction-wrapped. `DbContext` is application-scoped —
+created once in `AppContainer.initApplicationScope()`.
+
+==== `SensorRepository`
+
+The single entry point for all database reads and writes. Activities never
+call DAOs directly. `SensorRepository` owns the calls to `DbContext` and
+exposes typed `insertAccel/Gyro/Magnet/Ereignis()` and corresponding
+`insert*Batch()` methods for the `McpDataSyncService` historical sync.
 
 [#config_module]
 === `config` — runtime configuration
@@ -475,29 +486,31 @@ The single source of truth for runtime configuration. Reads from
 |===
 
 [#di_container]
-=== `di` — dependency container
+=== `config` — runtime configuration and DI
 
 ==== `AppContainer`
 
-Two scopes:
+Lives in `config/`, instantiated once by `BiotApplication.onCreate()` so it
+survives screen rotation. Two scopes:
 
 * **Application scope** (`initApplicationScope(context)`)
-** `DB`, `SensorDao`, `ValueSensorDAO`
+** `DB` → `DbContext` → `SensorRepository` → `McpDataSyncService`
+** `LlmQueryHandler` (pure HTTP, no Activity reference — safe across rotations)
+** `MutableLiveData<LlmAction>` — shared observer hub for all LLM responses
 ** Idempotent — safe to call multiple times.
 
 * **Activity scope** (`initActivityScope(activity)`)
 ** `MqttHandler` (built using the broker URL from `AppConfig`)
 ** `TtsManager`
-** `LlmQueryHandler` (built with the chat endpoint from `AppConfig`)
 ** Released by `releaseActivityScope()` in `onDestroy`.
 
 Why hand-rolled instead of Hilt:
 
-* Dependency graph is small (5 collaborators).
+* Dependency graph is small (5–6 collaborators).
 * Hilt requires kapt, annotation processors, and per-Activity injection
   modules — for this graph that is more code than the production logic.
-* A 60-line container is easier to read for new contributors and easier to
-  step through in the debugger.
+* A ~120-line container is easier to read for new contributors and easier
+  to step through in the debugger.
 
 == MQTT Contract
 
@@ -512,7 +525,7 @@ to maintain the server-side mirror DB.
 | `Sensor/Bewegung`        | ESP → App | CSV `x,y,z` floats (in g)
 | `Sensor/Gyro`            | ESP → App | CSV `x,y,z` floats (in deg/s)
 | `Sensor/Magnet`          | ESP → App | CSV `x,y,z` floats
-| `Sensor/Mic`             | ESP → App | Integer (0–1023, KY-037 raw)
+| `Sensor/Mic`             | (not subscribed) | KY-037 removed — topic reserved but unused
 | `Control/Mode`           | App → ESP | `STREAM` \| `BURST` \| `AVERAGE` (retained)
 | `Control/OperatingMode`  | App → ESP | `AUTARK` \| `SUPERVISION` \| `EVENT` \| `IDENTIFICATION` (retained)
 | `Control/OperatingMode/Get` | App → ESP | Any payload — request a re-publish
@@ -913,8 +926,8 @@ beyond a local LAN:
 | Goal | Strategy
 
 | High-frequency ingest without UI freezes
-| `DB.databaseWriteExecutor` for inserts; MQTT operations on dedicated
-  background threads inside `MqttHandler`.
+| `SensorRepository` wraps all inserts in `DbContext.execute_write()` (transaction-safe);
+  MQTT operations run on dedicated background threads inside `MqttHandler`.
 
 | Reactive UI
 | Room `LiveData` everywhere a chart could redraw.

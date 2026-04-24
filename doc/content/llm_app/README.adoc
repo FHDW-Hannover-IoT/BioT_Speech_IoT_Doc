@@ -67,7 +67,7 @@ skinparam componentStyle rectangle
 [FastAPI /chat] --> [SensorAgent] : run(message)
 [SensorAgent] --> [LLMProvider] : run + tools
 [LLMProvider] --> [Anthropic / OpenAI / DeepSeek / Gemini] : HTTPS
-[SensorAgent] --> [MCP Server] : POST /tools/call
+[SensorAgent] --> [MCP Server] : POST /mcp (JSON-RPC 2.0)
 [MCP Server] --> [SQLite]      : SELECT (read-only)
 
 [ESP8266] --> [Mosquitto] : Sensor/*
@@ -94,7 +94,7 @@ If your AsciiDoc renderer doesn't have PlantUML, here it is in ASCII:
                   │                  ▼                                  │
                   │            app/agent.py  (provider-agnostic)        │
                   └──────┬─────────────────────┬───────────────────────┘
-                         │ HTTPS               │ HTTP /tools/call
+                         │ HTTPS               │ POST /mcp (JSON-RPC 2.0)
                          ▼                     ▼
        ┌───────────────────────────┐   ┌───────────────────────────┐
        │ Anthropic / OpenAI /      │   │ mcp_server/                │
@@ -119,7 +119,7 @@ If your AsciiDoc renderer doesn't have PlantUML, here it is in ASCII:
                               └─────────────────▲─────────────────────┘
                                                 │ publishes Sensor/*
                               ┌─────────────────┴─────────────────────┐
-                              │ ESP8266 + KY-037 + MPU-6050 + A3144   │
+                              │ ESP8266 + MPU-6050 + A3144            │
                               └───────────────────────────────────────┘
 ----
 
@@ -201,23 +201,23 @@ topics — they just write to different files.
 LLM_App/
 ├── app/
 │   ├── main.py              FastAPI entry point + lifespan
-│   ├── agent.py             SensorAgent — provider-agnostic
-│   ├── database.py          SQLite helpers (used outside MCP if needed)
-│   ├── logger.py            Centralised logging
+│   ├── agent.py             SensorAgent — provider-agnostic orchestration
+│   ├── logger.py            Centralised logging (rotating file + console)
 │   └── providers/
-│       ├── base.py          LLMProvider abstract base
+│       ├── base.py          LLMProvider abstract base (ABC)
 │       ├── anthropic.py     Claude implementation
 │       ├── openai.py        GPT implementation
 │       ├── deepseek.py      DeepSeek implementation
 │       ├── gemini.py        Gemini implementation
 │       └── __init__.py      create_provider() factory
+├── database/
+│   ├── db_context.py        DbContext — persistent write connection, WAL, DDL
+│   └── sensor_repository.py SensorRepository — typed read/write for all tables
 ├── mcp_server/
-│   ├── sensor_mcp_server.py FastMCP server with sensor tools
+│   ├── sensor_mcp_server.py FastMCP server — seven sensor tools over HTTP
 │   └── mqtt_subscriber.py   Background MQTT → SQLite writer
 ├── config/
-│   └── settings.py          Settings class (reads .env)
-├── docs/
-│   └── LLM_USE_CASES.md     Use case spec + JSON action contract
+│   └── settings.py          Settings class (reads .env, resolves once at startup)
 ├── data/
 │   └── sensor_database.db   Created on first MQTT message
 ├── logs/
@@ -294,7 +294,7 @@ to `LlmAction.parse`. See <<json_contract>> for the full schema.
 * Holds the tool catalogue (provider-agnostic descriptions of every
   callable tool).
 * Implements `_dispatch_tool(name, inputs)` which forwards every tool call
-  to the MCP server over HTTP (`POST /tools/call`).
+  to the MCP server via JSON-RPC 2.0 over HTTP (`POST /mcp`).
 * Delegates the actual provider conversation to whichever `LLMProvider`
   the factory chose.
 
@@ -525,24 +525,31 @@ LLM_API_KEY=...
 === `config/settings.py` — configuration
 
 The `Settings` class is the single source of truth for runtime
-configuration. Every property is a lazy read of an environment variable
-with a sensible default. The module is imported as `settings` (lowercase
-singleton).
+configuration. All values are resolved once in `__init__` at startup and
+stored as plain attributes — no repeated `os.getenv()` on every access.
+The module is imported as `settings` (lowercase singleton).
 
 [options="header",cols="2,3,2"]
 |===
 | Property | Source env var | Default
 
-| `llm_provider`     | `LLM_PROVIDER`     | `anthropic`
-| `llm_api_key`      | `LLM_API_KEY`      | (required, no default)
-| `llm_model`        | `LLM_MODEL`        | per-provider default
-| `sqlite_db_path`   | `SQLITE_DB_PATH`   | `<project>/data/sensor_database.db`
-| `mcp_server_port`  | `MCP_SERVER_PORT`  | `8002`
-| `mcp_server_url`   | `MCP_SERVER_URL`   | `http://localhost:{mcp_server_port}/mcp`
-| `mqtt_broker_host` | `MQTT_BROKER_HOST` | `127.0.0.1`
-| `mqtt_broker_port` | `MQTT_BROKER_PORT` | `1883`
-| `server_host`      | `SERVER_HOST`      | `0.0.0.0`
-| `server_port`      | `SERVER_PORT`      | `8001`
+| `llm_provider`              | `LLM_PROVIDER`              | `anthropic`
+| `llm_api_key`               | `LLM_API_KEY`               | (required, no default)
+| `llm_model`                 | `LLM_MODEL`                 | per-provider default
+| `sqlite_db_path`            | `SQLITE_DB_PATH`            | `<project>/data/sensor_database.db`
+| `mcp_server_port`           | `MCP_SERVER_PORT`           | `8002`
+| `mcp_server_url`            | `MCP_SERVER_URL`            | `http://localhost:{mcp_server_port}/mcp`
+| `mcp_probe_attempts`        | `MCP_PROBE_ATTEMPTS`        | `15`
+| `mcp_probe_interval_secs`   | `MCP_PROBE_INTERVAL_SECS`   | `1.0`
+| `mcp_probe_timeout_secs`    | `MCP_PROBE_TIMEOUT_SECS`    | `2.0`
+| `mcp_tool_timeout_secs`     | `MCP_TOOL_TIMEOUT_SECS`     | `30.0`
+| `mcp_max_rows`              | `MCP_MAX_ROWS`              | `50`
+| `mqtt_broker_host`          | `MQTT_BROKER_HOST`          | `127.0.0.1`
+| `mqtt_broker_port`          | `MQTT_BROKER_PORT`          | `1883`
+| `mqtt_reconnect_delay_secs` | `MQTT_RECONNECT_DELAY_SECS` | `5`
+| `mqtt_client_id_prefix`     | `MQTT_CLIENT_ID_PREFIX`     | `biot-llm-subscriber`
+| `server_host`               | `SERVER_HOST`               | `0.0.0.0`
+| `server_port`               | `SERVER_PORT`               | `8001`
 |===
 
 If `LLM_PROVIDER` is set to an unsupported value or `LLM_API_KEY` is
@@ -807,17 +814,25 @@ sqlite> SELECT * FROM gyro_data ORDER BY timestamp DESC LIMIT 5;
 
 === Manually testing an MCP tool
 
-The MCP server speaks JSON over the `POST /tools/call` endpoint:
+The MCP server speaks JSON-RPC 2.0 over `POST /mcp`:
 
 [source,bash]
 ----
-curl -X POST http://localhost:8002/tools/call \
+curl -X POST http://localhost:8002/mcp \
      -H "Content-Type: application/json" \
-     -d '{"name": "get_row_count", "arguments": {"table": "all"}}'
+     -d '{
+       "jsonrpc": "2.0",
+       "id": "1",
+       "method": "tools/call",
+       "params": {
+         "name": "get_row_count",
+         "arguments": {"table": "all"}
+       }
+     }'
 ----
 
-You should see a `content` array containing a text block with row counts
-and recency for every table.
+You should see a JSON-RPC response with a `result.content` array containing
+a text block with row counts and recency for every table.
 
 === Testing without the Android app
 

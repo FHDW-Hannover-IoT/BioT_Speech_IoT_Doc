@@ -1,0 +1,81 @@
+= LLM App — Changes
+:revdate: 2026-04-24
+:toc: left
+:toc-title: Contents
+
+This document covers the changes made to the `BioT_Speech_IoT_LLM_App` codebase, identified through code review and implemented across the sessions on 23–24 April 2026.
+
+== Persistent write connection replacing per-insert SQLite connections
+
+In the original `mqtt_subscriber.py`, every INSERT opened a new `sqlite3.connect()` call and immediately closed it. In Stream mode the sensor publishes at 50 Hz, meaning 50 database connections were being opened and closed per second.
+
+The fix: `DbContext` now holds a single persistent write connection (WAL journal mode) for the entire lifetime of the process. All writes from the MQTT subscriber go through `DbContext.execute_write()` which reuses the same connection. This is safe because `threading.Lock()` serialises concurrent writers.
+
+== SQL injection prevention moved to the database driver level
+
+The `execute_query` MCP tool previously guarded against non-SELECT statements with a string check (`sql.strip().upper().startswith("SELECT")`). A UNION or semicolon-separated statement could have bypassed this.
+
+The fix: read connections are opened with the SQLite URI `file:...?mode=ro`, which enforces read-only access at the driver level. The string check is kept as a belt-and-suspenders guard but is no longer the only line of defence.
+
+== Settings resolved once at startup
+
+The original `settings.py` used `@property` decorators that called `os.getenv()` on every property access, meaning environment variables were re-read and re-validated on every call.
+
+The fix: `Settings.__init__` reads and validates all values exactly once and stores them as plain attributes. Accessing `settings.llm_provider` is now a simple attribute read with zero overhead.
+
+== Probe-loop replaces hardcoded sleep before MCP server check
+
+The original `main.py` had a `time.sleep(3.0)` call before the MCP server probe loop. Three seconds is arbitrary — too short on a slow machine, wasteful on a fast one.
+
+The fix: the fixed sleep was removed. The probe loop now starts immediately after the subprocess is launched and already handles the "not ready yet" case gracefully. A 0.5-second initial check catches an immediate crash early before the probe loop starts.
+
+== MQTT client ID now unique per instance
+
+The MQTT client ID was hardcoded as `"biot-llm-subscriber"`. Running two instances simultaneously caused the broker to kick the first instance when the second connected.
+
+The fix: a short UUID suffix is appended at runtime — `"biot-llm-subscriber-<8 hex chars>"` — so each instance gets a unique ID.
+
+== Tunable values moved from source into settings.py
+
+Several values were hardcoded in source that should be configurable through `.env`:
+
+* `mqtt_reconnect_delay_secs` — seconds before retrying a dropped MQTT connection (was `_RECONNECT_DELAY_SECS = 5` in `mqtt_subscriber.py`)
+* `mcp_max_rows` — maximum rows any MCP tool returns (was `_MAX_ROWS = 50` in `sensor_mcp_server.py`)
+* `mcp_probe_attempts` — how many probe attempts before giving up (was `range(15)` in `main.py`)
+* `mcp_probe_interval_secs` — delay between probe attempts (was `time.sleep(1.0)`)
+* `mcp_probe_timeout_secs` — per-probe HTTP timeout (was `timeout=2.0`)
+* `mcp_tool_timeout_secs` — HTTP timeout for agent-to-MCP tool calls (was `timeout=30.0`)
+* `mqtt_client_id_prefix` — prefix before the UUID suffix in the client ID
+
+All have sensible defaults in `settings.py` so existing `.env` files do not need to change.
+
+== MCP transport corrected to Streamable HTTP JSON-RPC 2.0
+
+The original `agent.py` dispatched tool calls to `POST {mcp_url}/tools/call`. FastMCP's Streamable HTTP transport uses JSON-RPC 2.0 via `POST /mcp`, not a `/tools/call` path.
+
+The fix: `_dispatch_tool()` now sends a proper JSON-RPC 2.0 envelope (`{"jsonrpc": "2.0", "method": "tools/call", "params": {...}}`) to `POST /mcp`. The tool call path is now correct end-to-end.
+
+== Database layer restructured
+
+The database access code was moved from `app/database.py` into a dedicated top-level `database/` package with two modules:
+
+* `database/db_context.py` — `DbContext`: owns the persistent write connection, WAL mode, schema DDL, thread-locking
+* `database/sensor_repository.py` — `SensorRepository`: typed read/write access to every sensor table; all data access goes through this class
+
+This gives the subscriber, the MCP server, and the FastAPI data endpoints a clean, typed API and keeps raw SQL confined to the repository layer.
+
+== Provider-agnostic LLM abstraction
+
+The `LLMProvider` abstract base class was added in `app/providers/base.py`. Concrete implementations for Anthropic Claude, OpenAI GPT, DeepSeek, and Google Gemini live in `app/providers/`. A factory function `create_provider()` in `app/providers/__init__.py` resolves `LLM_PROVIDER` from `.env` and returns the matching subclass with lazy SDK imports.
+
+Switching provider requires one `.env` line change and no code edits.
+
+== /data/* historical endpoints for Android sync
+
+Three new endpoints were added to `app/main.py` to feed historical sensor data to the Android `McpDataSyncService`:
+
+* `GET /data/accel?from=<ms>&to=<ms>`
+* `GET /data/gyro?from=<ms>&to=<ms>`
+* `GET /data/magnet?from=<ms>&to=<ms>`
+
+Response shape: `{"rows": [{"timestamp": ms, "x": f, "y": f, "z": f}, ...]}`. The Android side already parses this exact shape.
