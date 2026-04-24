@@ -1,0 +1,965 @@
+= BioT Speech IoT — Android App Reference
+:revnumber: 2.0
+:revdate: {docdate}
+:author: BioT Speech IoT Team
+:toc: left
+:toc-title: Contents
+:sectnums:
+:sectanchors:
+:icons: font
+
+[abstract]
+This document is the technical reference for the Android client of the BioT
+Speech IoT system. It explains the architecture, every Java package, all
+configuration knobs, the voice + LLM pipeline, the MQTT contract, how to
+build and run the app, and how to diagnose every common failure mode.
+
+If you are looking for the higher-level project context (sensors used,
+research goal, supervisor) see `BioT_Speech_IoT_Doc/doc/index.adoc`.
+If you are looking for the LLM backend, see `BioT_Speech_IoT_LLM_App/README.adoc`.
+
+== Scope
+
+* **Purpose:** Android client that subscribes to MQTT sensor topics published
+  by an ESP8266, displays live readings, persists them in a local Room
+  database, and lets the user control the system via voice commands. Voice
+  commands the local keyword dictionary cannot resolve are forwarded to the
+  LLM backend over HTTP.
+* **Goals:** Real-time visualisation, offline charts via Room + LiveData,
+  a voice pipeline that works without an internet connection for the common
+  commands and falls back gracefully to the LLM for everything else.
+* **Non-goals:** No cloud backend dependency for normal operation. No
+  authentication on the MQTT broker (development setup only — see
+  <<security_notes>>). No sensor fusion or motion classification — the app
+  visualises raw sensor data.
+
+[#part_1_context]
+== Context
+
+The Android app is one of three projects that together make up the BioT
+Speech IoT system:
+
+[options="header",cols="1,3"]
+|===
+| Project | Role
+
+| `BioT_Speech_IoT_App` (this one)
+| Android client. Subscribes to MQTT, drives the UI, owns the on-phone Room
+  DB, runs the voice pipeline.
+
+| `BioT_Speech_IoT_LLM_App`
+| Python FastAPI server with an MCP backend. Hosts the LLM, exposes
+  `POST /chat`, runs its own MQTT subscriber that mirrors data into a
+  separate SQLite DB the LLM can query.
+
+| `BioT_Speech_IoT_Doc`
+| AsciiDoc documentation including the canonical voice command dictionary
+  at `doc/content/command-dictionary.adoc`.
+|===
+
+The hardware sits behind the broker:
+
+----
+ESP8266 NodeMCU
+   ├─ MPU-6050 accel/gyro   → topics Sensor/Bewegung, Sensor/Gyro
+   └─ A3144 hall sensor     → topic Sensor/Magnet
+        │
+        ▼
+ Mosquitto broker (LAN, port 1883)
+        ▲
+        │
+   ┌────┴──────────────────────┐
+   │                           │
+ Android app             LLM_App's MQTT subscriber
+ (this project)          (subscribes & writes server-side SQLite)
+----
+
+NOTE: The KY-037 microphone hardware sensor is not part of this system. Voice input
+uses the Android phone's built-in microphone via Android SpeechRecognizer.
+
+== Architecture Overview
+
+=== Layered architecture
+
+The app follows a layered structure with explicit interface boundaries
+between layers so each layer is testable in isolation.
+
+[options="header",cols="1,3"]
+|===
+| Layer | Packages
+
+| **Presentation (Activities, layouts)**
+| `main`, `sensor`, `graph`, `events`, `settings`
+
+| **Voice pipeline**
+| `voice` (resolver, dictionary, executor, TTS, speech input)
+
+| **LLM bridge**
+| `llm` (HTTP client, JSON action parser, dispatcher)
+
+| **MQTT transport**
+| `mqtt` (handler implementing `IMqttPublisher`)
+
+| **Persistence**
+| `database` (Room entities, DAOs, executor)
+
+| **Configuration & DI**
+| `config` (`AppConfig`, `AppContainer`, `BiotApplication`, `LanguageManager`)
+|===
+
+=== Key design decisions
+
+[options="header",cols="2,5"]
+|===
+| Decision | Rationale
+
+| Room + LiveData for charts
+| Reactive UI updates without observer plumbing in every Activity. Survives
+  configuration changes (rotation) cleanly.
+
+| `IMqttPublisher` and `ILlmQueryHandler` interfaces
+| The `voice` package has zero compile-time knowledge of Eclipse Paho or
+  HTTP. Tests can substitute fakes without a broker or server.
+
+| `AppContainer` (hand-rolled DI) instead of Hilt/Dagger
+| The dependency surface is small (DAOs, MQTT, TTS, LLM handler). Adding
+  kapt-based DI here would dwarf the production code in build configuration.
+  ~60 lines of plain Java does the same job.
+
+| `BuildConfig` fields for broker / LLM endpoint
+| Per-developer configuration lives in `gradle.properties`, not in source.
+  No more committing your laptop's LAN IP.
+
+| Keep transmission modes (Stream/Burst/Average) AND operating modes
+  (Autark/Supervision/Event/Identification) on **separate** MQTT topics
+| They are orthogonal concepts (cadence vs. behaviour). Mashing them onto
+  one topic would force the firmware to interpret a single payload as
+  either a cadence change or a behaviour change.
+
+| Two SQLite databases on purpose (Room on phone, server-side SQLite for the
+  LLM)
+| Room's database file lives inside the Android app's private storage
+  (`/data/data/com.fhdw.biot.speech.iot/databases/`) and the MCP server
+  cannot reach it without `adb pull`. Both databases share an identical
+  schema and subscribe to the same MQTT firehose.
+|===
+
+=== Data flow at runtime
+
+==== Sensor data ingest
+
+----
+ESP8266 → Mosquitto → MqttHandler.messageArrived
+                          │
+                          ▼
+                MainActivity.handleMovement / handleGyro / handleMagnet
+                          │
+            ┌─────────────┴──────────────┐
+            ▼                            ▼
+    Update TextViews         SensorRepository.insertAccel/Gyro/Magnet()
+    on UI thread                          │
+                                   DbContext.execute_write()
+                                          │  (transaction-wrapped, thread-safe)
+                                          ▼
+                                Room DB → LiveData observers
+                                          → AccelActivity / GyroActivity / ...
+                                          → chart redraw
+----
+
+==== Voice command flow
+
+----
+btnVoice tap
+   │
+   ▼
+VoiceInputManager.startListening   (Android SpeechRecognizer)
+   │
+   ▼  onResult(transcript, hypotheses[])
+VoiceCommandResolver.resolveFromList(hypotheses)
+   │   walks rule table top-to-bottom, returns first match
+   ▼
+VoiceCommandExecutor.execute(activity, cmd, mqttPublisher, llmHandler, transcript)
+   │
+   ├── handled locally → TTS confirmation, returns true
+   │   (e.g. NAV_GYRO → startActivity(GyroActivity))
+   │
+   └── delegated to LLM → llmHandler.handleQuery(transcript), returns false
+       │
+       ▼
+       LlmQueryHandler runs on background thread:
+         POST http://<llm_host>:8001/chat  { "message": "..." }
+         response body: { "reply": "{\"action\":\"...\",\"tts\":\"...\"}" }
+         │
+         ▼
+         LlmAction.parse(reply)
+         │
+         ▼
+         dispatch on main thread:
+           NAVIGATE      → startActivity(<screen>)
+           MQTT_PUBLISH  → mqttPublisher.publish(topic, payload, retained=true)
+           APPLY_FILTER  → sendBroadcast(FILTER_ACTION, minutes=N)
+           CLEAR_FILTER  → sendBroadcast(FILTER_ACTION, minutes=0)
+           ANSWER        → (no side effect — TTS only)
+         │
+         ▼
+         TtsManager.speak(action.tts)
+----
+
+== Module Reference
+
+=== `main` — entry point
+
+==== `MainActivity`
+
+The home screen. Responsibilities:
+
+* Build the dependency container (see <<di_container>>).
+* Wire all sensor `TextView` updates from MQTT messages.
+* Render the two mode button rows (transmission + operating).
+* Handle the runtime `RECORD_AUDIO` permission flow.
+* Initialise the voice pipeline once permission is granted.
+* Dispatch resolved voice commands via `VoiceCommandExecutor`.
+* Tear down all activity-scoped collaborators in `onDestroy`.
+
+What `MainActivity` no longer does (compared to the pre-refactor version):
+
+* It no longer holds hardcoded broker URLs — those come from `AppConfig`.
+* It no longer detects the emulator inline — `AppConfig.isEmulator()` is the
+  single source of truth.
+* It no longer instantiates `MqttHandler`, `TtsManager`, or the LLM handler
+  directly — `AppContainer` builds them.
+* The `private final ILlmQueryHandler llmHandler = null;` placeholder is
+  gone; the handler is always wired (Issue #11 acceptance criterion).
+
+=== `voice` — speech recognition + intent resolution
+
+==== `VoiceCommand` (enum)
+
+Every intent the system can recognise. Grouped into:
+
+[options="header",cols="2,5"]
+|===
+| Group | Members
+
+| Navigation
+| `NAV_HOME`, `NAV_ACCEL`, `NAV_GYRO`, `NAV_MAGNET`, `NAV_MIC`,
+  `NAV_GRAPH`, `NAV_EVENTS`, `NAV_SETTINGS`
+
+| Time filters
+| `FILTER_LAST_5MIN`, `FILTER_LAST_10MIN`, `FILTER_LAST_30MIN`,
+  `FILTER_LAST_1H`, `FILTER_LAST_24H`, `FILTER_CLEAR`
+
+| Sensor + filter combos
+| `NAV_ACCEL_FILTER_10MIN`, `NAV_GYRO_FILTER_10MIN`,
+  `NAV_MAGNET_FILTER_10MIN`
+
+| Transmission mode (Control/Mode)
+| `MODE_STREAM`, `MODE_BURST`, `MODE_AVERAGE`
+
+| Operating mode (Control/OperatingMode)
+| `OPMODE_AUTARK`, `OPMODE_SUPERVISION`, `OPMODE_EVENT`,
+  `OPMODE_IDENTIFICATION`, `OPMODE_GET`
+
+| Calibration & event mgmt (rails laid; feature work pending)
+| `START_CALIBRATION`, `SET_EPSILON`, `CREATE_EVENT`, `SHOW_EVENTS`,
+  `SHOW_NOTIFICATIONS`, `TELL_VALUE`
+
+| Combined views
+| `COMBINED_MOTION`, `COMBINED_VIBRATION_SOUND`,
+  `COMBINED_ORIENTATION_MAGNETIC`, `COMBINED_ALL_SENSORS`
+
+| LLM-handled queries
+| `QUERY_ACCEL_VALUE`, `QUERY_GYRO_VALUE`, `QUERY_MAGNET_STATUS`,
+  `QUERY_MIC_LEVEL`, `QUERY_ANOMALY`, `QUERY_RECENT_EVENTS`
+
+| System
+| `SYSTEM_HELP`, `UNKNOWN`
+|===
+
+==== `VoiceCommandDictionary`
+
+Pure data. No Android imports. Each `Rule` pairs a `VoiceCommand` with one
+or more keyword groups:
+
+* **AND** between groups (every group must contribute one matched keyword)
+* **OR** within a group (any keyword in the group counts)
+
+Rule ordering matters because the resolver returns the first match. More
+specific rules sit before generic ones — for example `START_CALIBRATION`
+is checked before `NAV_GYRO` so "calibrate the gyro" doesn't navigate.
+
+Adding a rule:
+[source,java]
+----
+r.add(Rule.of(VoiceCommand.YOUR_COMMAND,
+        new String[]{"keyword1", "keyword2"},   // group 1 — required
+        new String[]{"keyword3", "keyword4"})); // group 2 — required
+----
+
+==== `VoiceCommandResolver`
+
+Stateless utility class. Takes either a single transcript or a list of
+hypotheses (Android's `SpeechRecognizer` returns up to 5). Returns the
+first matching `VoiceCommand`, or `UNKNOWN`.
+
+The transcript is normalised before matching:
+
+* lowercased (English locale to keep umlauts intact)
+* punctuation stripped
+* whitespace collapsed
+
+==== `VoiceCommandExecutor`
+
+The bridge from intent to action. Takes the `Activity`, the resolved
+command, an `IMqttPublisher`, an `ILlmQueryHandler`, and the raw transcript.
+
+Returns:
+
+* `true` if the command was fully handled locally
+* `false` if the command was forwarded to the LLM (which will produce the
+  user-visible response)
+
+This is the only place the voice package touches concrete Activity classes
+(for `startActivity` calls) and broadcast intents (for filter changes).
+
+==== `TtsManager`
+
+Wraps Android's `TextToSpeech`. Currently configured for English with German
+fallback. Handles the awkward fact that TTS init is asynchronous: utterances
+requested before init completes are queued and spoken once ready.
+
+==== `VoiceInputManager`
+
+Wraps `SpeechRecognizer` for **push-to-talk without the Google dialog popup**.
+The mic button itself is the visual cue — it tints red while listening.
+Handles all the lifecycle traps:
+
+* must be created on the main thread (Android requirement)
+* must be `destroy()`-ed in `onDestroy` to avoid leaks
+* `startListening()` is a no-op if already listening
+* errors and silence both trigger `onError` then `onListeningEnded`
+
+==== `ILlmQueryHandler` (interface)
+
+The contract the LLM bridge implements. Lives in the `voice` package so the
+voice package never imports anything HTTP-related.
+
+=== `llm` — LLM bridge
+
+==== `LlmAction`
+
+Typed view of the JSON returned by `POST /chat`. Five action types:
+
+[options="header",cols="2,5"]
+|===
+| `action` value | Meaning
+
+| `answer`        | Pure data answer; speak `tts`, no side effect.
+| `navigate`      | `startActivity(<screen>)`; `screen` field names the Activity.
+| `mqtt_publish`  | `mqttPublisher.publish(topic, payload, retained=true)`.
+| `apply_filter`  | Broadcast `FILTER_ACTION` with `minutes=N`.
+| `clear_filter`  | Broadcast `FILTER_ACTION` with `minutes=0`.
+|===
+
+`LlmAction.parse(raw)` is robust to:
+
+* JSON wrapped in markdown fences (` ```json ... ``` `)
+* JSON preceded or followed by chatty prose
+* Missing optional fields
+* Plain prose with no JSON at all (treated as ANSWER with the prose as `tts`)
+* Malformed JSON (treated as ANSWER with the prose as `tts`)
+
+==== `LlmQueryHandler`
+
+Implements `ILlmQueryHandler` (Issue #11). Flow:
+
+1. POST the raw transcript to the `/chat` endpoint on a background thread
+2. Parse the response into an `LlmAction`
+3. Marshal back to the main thread to dispatch
+4. Always speak `action.tts` first (or the fallback prompt if `tts` is empty)
+5. Perform the side-effect (navigate, publish, filter)
+
+Threading: HTTP runs on a dedicated single-thread `ExecutorService`. UI work
+is posted via a main-thread `Handler`. The executor is shut down by
+`AppContainer.releaseActivityScope()` on `onDestroy`.
+
+Timeouts: 5 s connect, 30 s read. The 30 s read accommodates a slow first
+LLM token without giving up on a working request.
+
+Fallback prompt (Issue #11 UNKNOWN_INTENT acceptance criterion):
+
+> "Sorry, I didn't catch that. Could you repeat your question?"
+
+This is spoken whenever the network call fails, the JSON is malformed, or
+the LLM returns an empty `tts`.
+
+[#mqtt_module]
+=== `mqtt` — broker integration
+
+==== `IMqttPublisher` (interface)
+
+Three methods:
+
+[source,java]
+----
+void publish(String topic, String payload);
+void publish(String topic, String payload, boolean retained);
+boolean isConnected();
+----
+
+`VoiceCommandExecutor` and `LlmQueryHandler` both depend on this interface,
+not on `MqttHandler` directly. That keeps the voice and LLM packages
+testable without a broker.
+
+==== `MqttHandler`
+
+Thin wrapper around Eclipse Paho's `MqttAsyncClient` (MQTT v5).
+Responsibilities:
+
+* Owns the single client instance.
+* Provides `connect`, `subscribe`, `publish`, `disconnect`.
+* Forwards every incoming message to the registered `MqttMessageListener`.
+* Maintains a `connected` flag combined with `client.isConnected()`.
+* Each operation runs on its own short-lived background thread; the UI
+  thread never blocks on network I/O.
+
+Connection options used:
+
+[options="header",cols="2,3"]
+|===
+| Option | Value
+| `automaticReconnect` | `true` — Paho retries on link drop
+| `cleanStart`         | `true` — start a fresh session, no old subs
+| QoS for subscribe    | 1 (at-least-once)
+| Persistence          | `MemoryPersistence` (no disk on Android)
+|===
+
+=== `database` — Room persistence
+
+==== Entities
+
+[options="header",cols="2,3"]
+|===
+| Entity | Columns
+
+| `AccelData`    | `id`, `timestamp` (ms), `accelX`, `accelY`, `accelZ`
+| `GyroData`     | `id`, `timestamp` (ms), `gyroX`, `gyroY`, `gyroZ`
+| `MagnetData`   | `id`, `timestamp` (ms), `magnetX`, `magnetY`, `magnetZ`
+| `EreignisData` | `id`, `timestamp` (ms), `sensorType`, `value`, `axis`
+| `Sensor`       | `sensorID`, `sensorName`
+| `ValueSensor`  | `id`, `value1..6` — combined accelerometer+gyro tuple for legacy queries
+|===
+
+==== `SensorDao`
+
+All SELECTs return `LiveData<List<...>>` so chart Activities update
+automatically. Date-range queries (`getAccelDataBetween` etc.) use
+indexed `WHERE timestamp BETWEEN ?` clauses.
+
+==== `DbContext`
+
+Wraps Room's `runInTransaction()`. All writes go through `DbContext` so every
+insert is properly transaction-wrapped. `DbContext` is application-scoped —
+created once in `AppContainer.initApplicationScope()`.
+
+==== `SensorRepository`
+
+The single entry point for all database reads and writes. Activities never
+call DAOs directly. `SensorRepository` owns the calls to `DbContext` and
+exposes typed `insertAccel/Gyro/Magnet/Ereignis()` and corresponding
+`insert*Batch()` methods for the `McpDataSyncService` historical sync.
+
+[#config_module]
+=== `config` — runtime configuration
+
+==== `AppConfig`
+
+The single source of truth for runtime configuration. Reads from
+`BuildConfig` fields generated by Gradle:
+
+[options="header",cols="2,1,2"]
+|===
+| Method | Returns | Source
+| `mqttBrokerUrl()`    | String | `EMULATOR_BROKER_URL` if `isEmulator()`, else `PHONE_BROKER_URL`
+| `llmChatEndpoint()`  | String | `http://<LLM_HOST_*>:LLM_PORT/chat`
+| `isEmulator()`       | boolean | Inspects `Build.FINGERPRINT/MODEL/PRODUCT`
+|===
+
+[#di_container]
+=== `config` — runtime configuration and DI
+
+==== `AppContainer`
+
+Lives in `config/`, instantiated once by `BiotApplication.onCreate()` so it
+survives screen rotation. Two scopes:
+
+* **Application scope** (`initApplicationScope(context)`)
+** `DB` → `DbContext` → `SensorRepository` → `McpDataSyncService`
+** `LlmQueryHandler` (pure HTTP, no Activity reference — safe across rotations)
+** `MutableLiveData<LlmAction>` — shared observer hub for all LLM responses
+** Idempotent — safe to call multiple times.
+
+* **Activity scope** (`initActivityScope(activity)`)
+** `MqttHandler` (built using the broker URL from `AppConfig`)
+** `TtsManager`
+** Released by `releaseActivityScope()` in `onDestroy`.
+
+Why hand-rolled instead of Hilt:
+
+* Dependency graph is small (5–6 collaborators).
+* Hilt requires kapt, annotation processors, and per-Activity injection
+  modules — for this graph that is more code than the production logic.
+* A ~120-line container is easier to read for new contributors and easier
+  to step through in the debugger.
+
+== MQTT Contract
+
+The Android app and the ESP8266 firmware must agree on these topics and
+payload formats. The LLM_App's MQTT subscriber follows the same contract
+to maintain the server-side mirror DB.
+
+[options="header",cols="2,1,3"]
+|===
+| Topic | Direction | Payload format
+
+| `Sensor/Bewegung`        | ESP → App | CSV `x,y,z` floats (in g)
+| `Sensor/Gyro`            | ESP → App | CSV `x,y,z` floats (in deg/s)
+| `Sensor/Magnet`          | ESP → App | CSV `x,y,z` floats
+| `Sensor/Mic`             | (not subscribed) | KY-037 removed — topic reserved but unused
+| `Control/Mode`           | App → ESP | `STREAM` \| `BURST` \| `AVERAGE` (retained)
+| `Control/OperatingMode`  | App → ESP | `AUTARK` \| `SUPERVISION` \| `EVENT` \| `IDENTIFICATION` (retained)
+| `Control/OperatingMode/Get` | App → ESP | Any payload — request a re-publish
+|===
+
+Burst mode payloads on `Sensor/Bewegung`, `Sensor/Gyro`, `Sensor/Magnet`
+contain multiple `x,y,z` triplets concatenated:
+
+----
+1.23,-0.45,9.81,1.24,-0.46,9.80,1.25,-0.45,9.79
+----
+
+The Android app and the LLM_App subscriber both parse these in groups of
+three so the same code path handles both Stream and Burst modes.
+
+[#mode_distinction]
+=== Transmission mode vs. operating mode — they are different
+
+[options="header",cols="2,3,3"]
+|===
+| Concept | What it controls | Topic
+
+| Transmission mode (Stream / Burst / Average)
+| **How often** the ESP8266 publishes — every reading, batched every 5 s,
+  or one rolling average every 5 s.
+| `Control/Mode`
+
+| Operating mode (Autark / Supervision / Event / Identification)
+| **What** the ESP8266 is doing — sleeping for power, streaming
+  everything, only emitting on threshold crossings, or recording into
+  the DB.
+| `Control/OperatingMode`
+|===
+
+The two are orthogonal — for example you can be in Supervision (sending
+all data) at Burst cadence (batched every 5 s).
+
+== Voice Pipeline Reference
+
+=== Layered execution
+
+When you tap the mic button, three things happen in order:
+
+1. **Speech recognition** (`VoiceInputManager`): Android's
+   `SpeechRecognizer` runs locally if Google services are present; otherwise
+   it streams to Google's servers. Returns up to 5 ranked hypotheses.
+
+2. **Intent resolution** (`VoiceCommandResolver`): walks the rule table in
+   `VoiceCommandDictionary` and returns the first match across any
+   hypothesis. Returns `UNKNOWN` if nothing matches.
+
+3. **Execution** (`VoiceCommandExecutor`): switches on the command and
+   either acts locally or forwards to `ILlmQueryHandler.handleQuery()`.
+
+For commands the local pipeline cannot resolve (`UNKNOWN`), the executor
+forwards the raw transcript to the LLM. The LLM may understand
+"what was the gyro doing five minutes ago when the magnet sensor flipped?"
+even though no keyword rule covers it.
+
+=== Adding a new voice command
+
+Five edits, in this order:
+
+. Add the enum value to `voice/VoiceCommand.java`.
+. Add a `Rule.of(...)` to `voice/VoiceCommandDictionary.buildRules()`.
+  Place it before any rule that would otherwise match the same keywords.
+. Add a `case` in `voice/VoiceCommandExecutor.execute(...)` that performs
+  the action.
+. Add a confirmation phrase in `main/MainActivity.toConfirmation(...)`.
+. If the command is conversational (entity extraction needed), update
+  `LLM_App/docs/LLM_USE_CASES.md` and the agent system prompt in
+  `LLM_App/app/agent.py` so the LLM knows about it.
+
+=== Mode buttons in the UI
+
+The home screen has two rows of mode buttons:
+
+[options="header",cols="2,3,3"]
+|===
+| Row | Buttons | MQTT topic
+| Top    | Stream, Burst, Average                              | `Control/Mode`
+| Bottom | Autark, Supervision, Event, Identification          | `Control/OperatingMode`
+|===
+
+Both rows highlight the active button by setting `alpha=1.0` on the active
+button and `alpha=0.4` on the rest. The two `TextView` labels above show
+the current mode for each topic. When the ESP8266 republishes the retained
+mode value (after a reset, for example) the buttons update reactively.
+
+== Configuration
+
+All runtime configuration is read from `BuildConfig` fields. The fields are
+generated by Gradle in `app/build.gradle`. Defaults work out of the box.
+
+=== Build configuration knobs
+
+Add these to the project-root `gradle.properties` file (or your private
+`~/.gradle/gradle.properties`) to override per developer:
+
+[source,properties]
+----
+biot.phoneBroker=tcp://192.168.0.42:1883
+biot.emulatorBroker=tcp://10.0.2.2:1883
+biot.llmHostPhone=192.168.0.42
+biot.llmHostEmulator=10.0.2.2
+biot.llmPort=8001
+----
+
+[options="header",cols="2,2,3"]
+|===
+| `gradle.properties` key | `BuildConfig` field | Default
+
+| `biot.phoneBroker`     | `PHONE_BROKER_URL`    | `tcp://192.168.178.80:1883`
+| `biot.emulatorBroker`  | `EMULATOR_BROKER_URL` | `tcp://10.0.2.2:1883`
+| `biot.llmHostPhone`    | `LLM_HOST_PHONE`      | `192.168.178.80`
+| `biot.llmHostEmulator` | `LLM_HOST_EMULATOR`   | `10.0.2.2`
+| `biot.llmPort`         | `LLM_PORT`            | `8001`
+|===
+
+The previously hardcoded `PHONE_BROKER = "tcp://192.168.x.x:1883"` constant
+in `MainActivity` is gone. Source no longer needs editing per machine.
+
+=== Permissions
+
+Declared in `AndroidManifest.xml`:
+
+[options="header",cols="2,3"]
+|===
+| Permission | Why
+| `INTERNET` | LLM HTTP and MQTT
+| `RECORD_AUDIO` | Voice button
+| `POST_NOTIFICATIONS` | Sensor threshold notifications
+|===
+
+`RECORD_AUDIO` is requested at runtime in `MainActivity` because it is a
+dangerous permission. The voice button stays disabled if the user denies it.
+
+== Build & Run
+
+=== Prerequisites
+
+* Android Studio Hedgehog (2023.1) or newer
+* Android SDK with API 35 (`compileSdkVersion 35`, `minSdk 29`)
+* Java 11 (bundled with recent Android Studio installs)
+* A running Mosquitto broker (see <<mqtt_setup>>)
+* The LLM_App running on the same network if you want to test voice queries
+  that require the LLM (see `BioT_Speech_IoT_LLM_App/README.adoc`)
+
+=== Cloning and importing
+
+[source,bash]
+----
+git clone https://github.com/FHDW-Hannover-IoT/BioT_Speech_IoT_App.git
+----
+
+In Android Studio: *File → Open → BioT_Speech_IoT_App* (the project root,
+not the `app` subfolder). Let Gradle sync.
+
+=== Configuring the broker IP
+
+Edit `gradle.properties` at the project root and add:
+
+[source,properties]
+----
+biot.phoneBroker=tcp://YOUR_LAN_IP:1883
+biot.llmHostPhone=YOUR_LAN_IP
+----
+
+Replace `YOUR_LAN_IP` with what `ipconfig` shows under your active Wi-Fi
+adapter (e.g. `192.168.0.42`).
+
+=== Running on the emulator
+
+The emulator can't reach your PC's `localhost` directly — it uses the
+special address `10.0.2.2` instead. `AppConfig.isEmulator()` detects the
+emulator and picks `EMULATOR_BROKER_URL` automatically. No setup needed
+beyond starting Mosquitto.
+
+[source,bash]
+----
+# In one PowerShell:
+net start mosquitto
+
+# In Android Studio, hit Run on the emulator target.
+----
+
+=== Running on a real phone
+
+Three things have to be true:
+
+1. Phone and PC on the same Wi-Fi (not mobile data, not guest network).
+2. PC firewall allows inbound TCP 1883 (see <<firewall_setup>>).
+3. `biot.phoneBroker` in `gradle.properties` points at the correct LAN IP.
+
+[#mqtt_setup]
+=== Mosquitto broker setup
+
+Tested with Mosquitto 2.x on Windows. Linux/macOS works the same way.
+
+==== Install Mosquitto
+
+Download from https://mosquitto.org/download/[mosquitto.org/download].
+Default install location on Windows: `C:\Program Files\mosquitto`.
+
+==== Configure
+
+Edit `C:\Program Files\mosquitto\mosquitto.conf` (as Administrator) and
+append:
+
+----
+listener 1883
+allow_anonymous true
+----
+
+WARNING: `allow_anonymous true` means anyone on your local network can
+connect without authentication. Acceptable for development, not for
+production. See <<security_notes>>.
+
+Restart Mosquitto:
+
+[source,bash]
+----
+net stop mosquitto
+net start mosquitto
+----
+
+[#firewall_setup]
+==== Firewall
+
+Run once as Administrator:
+
+[source,bash]
+----
+netsh advfirewall firewall add rule name="Mosquitto" dir=in action=allow protocol=TCP localport=1883
+----
+
+Verify:
+
+[source,bash]
+----
+netsh advfirewall firewall show rule name="Mosquitto"
+----
+
+== Operations
+
+=== Verifying the broker is up
+
+[options="header",cols="2,3"]
+|===
+| Command | Expected output
+
+| `sc query mosquitto` | `STATE : 4 RUNNING`
+| `netstat -an \| findstr 1883` | `TCP    0.0.0.0:1883    LISTENING`
+| `mosquitto_sub -h 127.0.0.1 -t "#" -v` | Live stream of every published message
+|===
+
+=== Manual MQTT testing
+
+Publish a fake accelerometer reading from your PC:
+
+[source,bash]
+----
+mosquitto_pub -h 192.168.x.x -t Sensor/Bewegung -m "1.2,5.6,9.0"
+----
+
+Expected app behaviour:
+
+* Accel `TextView`s update on the home screen
+* A new row appears in `accel_data` (verify with `adb shell sqlite3 ...`
+  against the on-phone DB, or check the live chart in `AccelActivity`)
+* Logcat shows the incoming message
+
+Other topics:
+
+[source,bash]
+----
+mosquitto_pub -h 192.168.x.x -t Sensor/Gyro      -m "0.5,1.2,3.4"
+mosquitto_pub -h 192.168.x.x -t Sensor/Magnet    -m "0.0,0.0,1.0"
+mosquitto_pub -h 192.168.x.x -t Sensor/Mic       -m "412"
+mosquitto_pub -h 192.168.x.x -t Control/Mode     -m "BURST"      -r
+mosquitto_pub -h 192.168.x.x -t Control/OperatingMode -m "EVENT" -r
+----
+
+The `-r` flag makes the message retained, which means new subscribers
+(including the app on next launch) immediately receive the last value.
+
+=== Inspecting the on-phone database
+
+The Room DB lives at:
+
+----
+/data/data/com.fhdw.biot.speech.iot/databases/sensor_database
+----
+
+Pull it for inspection:
+
+[source,bash]
+----
+adb shell run-as com.fhdw.biot.speech.iot \
+    cat databases/sensor_database > sensor_database.db
+
+sqlite3 sensor_database.db "SELECT COUNT(*) FROM accel_data;"
+----
+
+=== Watching logs
+
+[source,bash]
+----
+adb logcat -s "MainActivity:*" "VoiceInputManager:*" "VoiceCommandResolver:*" \
+              "LlmQueryHandler:*" "MqttHandler:*" "TtsManager:*" "AppContainer:*"
+----
+
+== Troubleshooting
+
+[options="header",cols="2,2,3"]
+|===
+| Symptom | Likely cause | Fix
+
+| Toast "MQTT Fehler" on launch
+| Mosquitto not running, wrong IP, or firewall blocking
+| `net start mosquitto`; verify `biot.phoneBroker` in `gradle.properties`
+  matches `ipconfig`
+
+| Sensor `TextView`s show `%1$.2f`
+| No MQTT data has arrived yet
+| Normal on first launch; verify with `mosquitto_sub -t "#" -v`
+
+| Voice button does nothing
+| `RECORD_AUDIO` denied or `SpeechRecognizer` not available
+| Re-grant in Android Settings → Apps → BioT → Permissions; install
+  Google app if missing
+
+| Voice command resolves to wrong intent
+| Rule ordering in `VoiceCommandDictionary` — a more general rule
+  matched first
+| Move the more specific rule earlier in `buildRules()`
+
+| LLM queries always say "Sorry, I didn't catch that"
+| LLM_App not running or wrong host in `biot.llmHostPhone`
+| Check LLM_App logs for `Application startup complete`; check
+  `gradle.properties` matches the LLM_App host
+
+| `MqttHandler.publish` silently drops the message
+| `isConnected()` is false
+| Wait for the `MQTT verbunden` toast; check broker is reachable
+
+| App crashes in `onDestroy`
+| `AppContainer.releaseActivityScope()` not called or called twice
+| Check that custom Activities call `super.onDestroy()` after their own
+  cleanup
+
+| New mode button has no effect
+| `MainActivity.bindOperatingModeButtons()` skipped because
+  `findViewById` returned null
+| Confirm `activity_main.xml` has the `btnAutark` etc. IDs from the
+  refactor
+
+| LLM returns valid JSON but nothing happens
+| `LlmAction.parse` fell through to `ANSWER` — check the `action` value
+  spelling matches one of `navigate / mqtt_publish / apply_filter /
+  clear_filter / answer`
+| Inspect `LlmQueryHandler` logs (search for `Reply:` and `Dispatching
+  action=`)
+|===
+
+[#security_notes]
+== Security Notes
+
+The development setup is **not** production-grade. If you ever expose this
+beyond a local LAN:
+
+[options="header",cols="2,3"]
+|===
+| Risk | Mitigation
+
+| Anonymous MQTT
+| Set `allow_anonymous false` in `mosquitto.conf`, configure a `password_file`,
+  add credentials to the Paho `MqttConnectionOptions` in `MqttHandler`.
+
+| Plain-text MQTT
+| Switch to MQTT-over-TLS (port 8883), generate certificates, configure
+  `MqttConnectionOptions.setSocketFactory(...)`.
+
+| Plain-text HTTP to LLM_App
+| Front the FastAPI server with a reverse proxy (Caddy / nginx) and
+  terminate TLS there. Update `BuildConfig.LLM_PORT` and add an `https`
+  scheme in `AppConfig.llmChatEndpoint()`.
+
+| LLM_App accepts any client
+| Add an API key check on `POST /chat` and send it as a header from
+  `LlmQueryHandler.postChat`.
+|===
+
+== Quality & Constraints
+
+[options="header",cols="2,3"]
+|===
+| Goal | Strategy
+
+| High-frequency ingest without UI freezes
+| `SensorRepository` wraps all inserts in `DbContext.execute_write()` (transaction-safe);
+  MQTT operations run on dedicated background threads inside `MqttHandler`.
+
+| Reactive UI
+| Room `LiveData` everywhere a chart could redraw.
+
+| Voice pipeline testable without hardware
+| `IMqttPublisher` and `ILlmQueryHandler` interfaces; resolver and
+  dictionary are pure data.
+
+| Per-developer config without source edits
+| `BuildConfig` fields fed from `gradle.properties`.
+
+| LLM contract verifiable without a running LLM
+| `LlmAction.parse` is a pure function over strings; can be unit-tested
+  with hand-crafted JSON fixtures.
+|===
+
+Constraints to be aware of:
+
+* Android 10 (API 29) minimum because of `EdgeToEdge` insets and modern
+  `SpeechRecognizer` behaviour.
+* Eclipse Paho MQTT v5 client — depends on `org.eclipse.paho.mqttv5.client:1.2.5`.
+* `MPAndroidChart 3.1.0` for chart rendering.
+* No internet → only the local keyword voice commands work; LLM-bound
+  intents fall back to the "didn't catch that" prompt.
+
+== References
+
+* `BioT_Speech_IoT_Doc/doc/index.adoc` — high-level project documentation
+* `BioT_Speech_IoT_Doc/doc/content/command-dictionary.adoc` — canonical
+  voice command list (source of truth for both the dictionary and the LLM)
+* `BioT_Speech_IoT_LLM_App/README.adoc` — server-side companion
+* `BioT_Speech_IoT_LLM_App/docs/LLM_USE_CASES.md` — LLM JSON action contract
+* https://www.eclipse.org/paho/files/mqttdoc/MQTTAsyncClient/[Eclipse Paho MQTT v5 client docs]
+* https://github.com/PhilJay/MPAndroidChart[MPAndroidChart]
+* https://www.fhdw-hannover.de[FHDW Hannover]
