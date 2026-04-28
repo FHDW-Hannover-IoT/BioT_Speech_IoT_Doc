@@ -1,5 +1,5 @@
 = Biot Android App – Software Component Detailed Design (SWCDD)
-:revnumber: 1.2
+:revnumber: 0.1
 :revdate: {docdate}
 :author: {Leonie Abels, Lilli Anding, Osama Mohammad}
 :toc: left
