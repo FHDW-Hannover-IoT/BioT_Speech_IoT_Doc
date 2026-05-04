@@ -1,0 +1,146 @@
+= Test Script: Initial Functional Test
+
+:imagesdir: ./images
+
+This document outlines the test cases to verify the interaction between the sensor source (laptop 1), the backend infrastructure (laptop 2), and the mobile application (mobile phone).
+
+== Preparation (Setup Check)
+Before beginning the functional tests, ensure the following conditions are met:
+* **Server - 2:** The database (1) the MQTT broker (3) and the LLM (6) are running and accessible.
+* **Laptop (Sensor Simulator) - 4:** Ready to publish dummy sensor data (Accelerometer, Gyroscope, Magnetometer) via MQTT.
+* **Smartphone - 5:** The app is installed, running, and connected to the same network as the server and broker.
+
+image::initialTest.png[]
+
+== Test Execution Protocol
+
+[cols="7,15,30,35,13", options="header"]
+|===
+| ID | Scenario | Action | Expected Result | Pass / Fail
+
+| **TC1**
+| **System Start & Initial Connection**
+| Open the app and the graph view on the smartphone.
+| The graph view opens. The app connects to the database and displays the most recently saved historical data in all three graphs (if the database is not empty).
+| [ ] Pass +
+[ ] Fail
+
+| **TC2**
+| **Live Data Stream**
+| Start the script on the laptop that continuously publishes sensor data.
+| The graphs on the app begin to update. The X, Y, and Z lines draw continuously across the screen.
+| [ ] Pass +
+[ ] Fail
+
+| **TC3**
+| **Checkbox Filters**
+| While live data is flowing, toggle the checkboxes for "X-Axis", "Y-Axis", "Z-Axis", and "Sum" (Magnitude) off and on sequentially.
+| The graph redraws in real-time. Disabled axes disappear from the diagram, and enabled ones reappear. The app remains stable (no crashes).
+| [ ] Pass +
+[ ] Fail
+
+| **TC4**
+| **Sliding Window ("Last 10 Min")**
+| Click the "Last 10 Min" button.
+| The X-axis of all graphs jumps to the current 10-minute time window. The date labels on the "From" and "To" buttons update.
+| [ ] Pass +
+[ ] Fail
+
+| **TC5**
+| **Manual Historical Filtering**
+| While the "Last 10 Min" live mode is active, click the "From" date picker and select yesterday's date. Then click the "To" date picker and select today.
+| The sliding live mode stops immediately. The graphs briefly clear, then redraw using the historical data fetched from the selected time range.
+| [ ] Pass +
+[ ] Fail
+
+| **TC6.1**
+| **Douglas-Peucker Algorithm - max epsilon**
+| Navigate to the settings menu. Activate the algorithm and set the Epsilon slider to the highest value. Return to the main graph.
+| The graph is simplified. The line is reduced to a minimum number of vertices, showing heavy abstraction and retaining only the most extreme data points.
+| [ ] Pass +
+[ ] Fail
+
+| **TC6.2**
+| **Douglas-Peucker Algorithm - min epsilon**
+| Navigate to the settings menu. Activate the algorithm and set the Epsilon slider to the lowest value. Return to the main graph.
+| The graph displays more detail. The line appears identical to the raw, unsimplified data, with no reduction in vertices.
+| [ ] Pass +
+[ ] Fail
+
+| **TC6.3**
+| **Douglas-Peucker Algorithm - medium epsilon**
+| Navigate to the settings menu. Activate the algorithm and set the Epsilon slider to a medium value. Return to the main graph.
+| The lines become noticeably more smoothed.The graph shows moderate simplification. Minor fluctuations are smoothed out, but the primary shape, major peaks, and trends of the original data remain clearly visible and intact.
+| [ ] Pass +
+[ ] Fail
+
+| **TC7**
+| **Event Trigger & Notification**
+| Manually send an outlier from the laptop 1 (e.g. simulate an extremely high acceleration value representing a fall). Navigate to the Event List.
+| The event is immediately displayed in the list with an exact timestamp.
+| [ ] Pass +
+[ ] Fail
+
+| **TC8**
+| **Speech-to-Text**
+| Trigger the voice input button in the app for the first time. Speak a simple sentence.
+| The app requests Android microphone permissions. Once granted, the audio is successfully transcribed into text and displayed on the screen or logged in the console.
+| [ ] Pass +
+[ ] Fail
+
+| **TC9**
+| **Basic Intent Mapping & TTS (Valid Command)**
+| Trigger voice control and say exactly: *"Show accelerometer"*.
+| The STT transcribes the text. The Intent Mapper routes it to the correct action. The app switches the UI to the Accelerometer view. The TTS engine successfully announces: *"Showing accelerometer"*.
+| [ ] Pass +
+[ ] Fail
+
+| **TC10**
+| **Intent Mapping with Parameters**
+| Trigger voice control and say: *"Set mode to Event"*.
+| The app successfully extracts the parameter ("Event"). It commands the sensors to enter threshold-only mode and the TTS confirms: *"Mode set to Event"*.
+| [ ] Pass +
+[ ] Fail
+
+| **TC11**
+| **Safe Fallback for Unrecognized Commands**
+| Trigger voice control and say a random, unsupported phrase.
+| The Intent Mapper fails to find a match in the local dictionary. The app does not crash. It enters a safe fallback state and TTS responds something like: *"Command not recognized, please try again."*
+| [ ] Pass +
+[ ] Fail
+
+| **TC12**
+| **LLM API Connection & Error Handling**
+| Disconnect the smartphone from the internet, then trigger an advanced voice command meant for the LLM. Reconnect the internet and try again.
+| *Offline:* The app handles the network error gracefully (e.g., catching a timeout/HTTP error) without crashing. +
+*Online:* The app successfully sends the string to the LLM API and logs the raw HTTP 200 response.
+| [ ] Pass +
+[ ] Fail
+
+| **TC13**
+| **MCP Server & Contextual AI Query**
+| With the server running, trigger an advanced voice command that requires live context, e.g., *"Analyze the latest accelerometer data for anomalies"*.
+| The app sends the query to the LLM. The LLM connects to the backend MCP server. The MCP reads the live MQTT stream/database. The LLM returns a context-aware response via TTS (e.g., *"The current X-axis values are normal at 9.8"*).
+| [ ] Pass +
+[ ] Fail
+
+| **TC14**
+| **Connection Loss**
+| Turn off Wi-Fi on the smartphone while live data is streaming.
+| The app does not crash. It shows an error state and resumes seamlessly upon reconnection.
+| [ ] Pass +
+[ ] Fail
+
+| **TC15**
+| **Empty Database / Missing Data**
+| Select a time range using the Date Pickers for a period where the laptop was turned off.
+| The graph clear completely without crashing.
+| [ ] Pass +
+[ ] Fail
+|===
+
+== Focus
+
+* **System: ** TC1, TC2, TC7, TC12
+* **App: ** TC3, TC4, TC5, TC6, TC8, TC9, TC10, TC11, TC12, TC13, TC14, TC15
+* **Server: ** TC5, TC12, TC13, TC15
