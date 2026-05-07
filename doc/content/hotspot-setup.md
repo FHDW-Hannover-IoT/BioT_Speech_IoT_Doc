@@ -54,6 +54,13 @@ Laptop B IP  = 192.168.43.___   ← fill in
 Laptop C IP  = 192.168.43.___   ← fill in
 ```
 
+## Setting Requirements
+Einstullungen -> Netzwerk und Internet -> Erweiterte Netzwerkenstellungen -> Erweiterte n Freigabeeinstellungen
+
+Unter Öffenliche Netzwerke:
+Netzwerkerkennung Aus
+Datei- und Druckerfreigabe An
+
 ---
 
 ## Laptop A — Broker (Mosquitto)
