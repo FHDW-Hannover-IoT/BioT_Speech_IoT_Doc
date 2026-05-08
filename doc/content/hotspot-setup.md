@@ -258,7 +258,7 @@ Expected: a JSON response with `"reply"` containing a JSON action with a `"tts"`
 
 ### 1. Update gradle.properties before building
 
-In `BioT_Refactor/App/` (next to `settings.gradle`), create or edit `gradle.properties`:
+In `BioT_Speech_IoT_App/` (next to `settings.gradle`), create or edit `gradle.properties`:
 
 ```properties
 # Broker is on Laptop A
@@ -276,7 +276,7 @@ These feed into `BuildConfig` via `app/build.gradle` and are read at runtime by 
 Build the debug APK from Android Studio and sideload it, or:
 
 ```powershell
-cd BioT_Refactor\App
+cd BioT_Speech_IoT_App
 gradlew.bat installDebug
 ```
 
@@ -334,11 +334,10 @@ response = httpx.post(
 
 | File | Line | Issue |
 |---|---|---|
-| `app/agent.py` | 277 | `db_path: Path` parameter is accepted but never stored or used — dead parameter, remove it |
 | `mcp_server/mqtt_subscriber.py` | 293 | `_db_insert` opens and closes a new SQLite connection per INSERT — under burst mode this is slow; use a persistent WAL-mode connection |
 | `app/database.py` | — | Entire file is dead code, not imported anywhere; duplicates logic in the MCP server inline |
-| `.env` | 24–27 | `SQLITE_DB_PATH` and `MCP_FS_ROOTS` still point to old `BioT_Speech_IoT_LLM_App` path — clear both |
-| `app/main.py` | 83 | Unconditional `time.sleep(3.0)` before probe loop — reduce to 1.0 or remove |
+| `.env` | 24–27 | `SQLITE_DB_PATH` and `MCP_FS_ROOTS` still point to old path — clear both if using defaults |
+| `app/main.py` | 83 | `time.sleep(0.5)` before MCP probe — reduce if startup feels slow |
 
 ---
 
