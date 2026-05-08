@@ -1,0 +1,79 @@
+== Defined Event Catalog
+
+This chapter defines specific event thresholds for the sensor-logic implementation.
+An event is triggered immediately as soon as a single measurement (sample) meets the condition.
+
+[cols="1,2,2,1,3,3",options="header"]
+|===
+|Sensor Type |Sensor Name |Event Name |Axis |Event Value (Default) |Description
+
+|ACCEL
+|Accelerometer
+|Shock
+|X, Y, Z
+|stem:[abs(a_i) >= 20.0] m/s²
+|Detects a hard impact or impulse on any single axis.
+
+|ACCEL
+|Accelerometer
+|Zero-G Peak
+|Vector
+|stem:[sqrt(a_x^2 + a_y^2 + a_z^2) <= 1.5] m/s²
+|Detects a momentary state of free fall (magnitude near zero).
+
+|ACCEL
+|Accelerometer
+|Severe Impact
+|X, Y, Z
+|stem:[abs(a_i) >= 40.0] m/s²
+|Detects massive mechanical force (e.g., high-altitude fall or collision).
+
+|ACCEL
+|Accelerometer
+|Vibration Spike
+|X, Y, Z
+|stem:[abs(a_i) >= 12.0] m/s²
+|Detects a single high acceleration peak above normal movement levels.
+
+|ACCEL
+|Accelerometer
+|Tilt Limit
+|X, Y
+|stem:[abs(a_(x,y)) >= 6.5] m/s²
+|Detects a static tilt of approx. 40° relative to the vertical axis.
+
+|GYRO
+|Gyroscope
+|Rotation Peak
+|X, Y, Z
+|stem:[abs(omega_i) >= 4.5] rad/s
+|Detects a momentary, very fast rotational movement around an axis.
+
+|GYRO
+|Gyroscope
+|Motion Start
+|X, Y, Z
+|stem:[abs(omega_i) >= 0.5] rad/s
+|Detects the transition from a stationary state to active rotation.
+
+|MAGNET
+|Magnetometer
+|Magnetic Contact
+|X, Y, Z
+|stem:[abs(B_i) >= 150] µT
+|Detects the immediate proximity of a strong magnetic field.
+
+|MAGNET
+|Magnetometer
+|Field Minimum
+|X, Y, Z
+|stem:[abs(B_i) <= 15] µT
+|Detects values significantly below the Earth's magnetic field (e.g., shielding).
+
+|MAGNET
+|Magnetometer
+|Field Anomaly
+|Vector
+|stem:[sqrt(B_x^2 + B_y^2 + B_z^2) >= 250] µT
+|Detects extreme magnetic saturation of the sensor (total vector).
+|===
