@@ -302,34 +302,6 @@ On the phone's main screen, tap connect — the MQTT status should turn green on
 
 ## Known Code Issues
 
-These issues exist in the current codebase and should be addressed before the demo.
-
-### Critical — verify before demo
-
-**`LLM_App/app/agent.py` line 313 — MCP tool dispatch URL**
-
-The agent calls:
-```python
-httpx.post(f"{self._mcp_url}/tools/call", json={"name": name, "arguments": inputs})
-```
-This resolves to `POST http://localhost:8002/mcp/tools/call`.
-The standard FastMCP Streamable HTTP transport only listens at `/mcp` (root) using JSON-RPC format — there is no `/tools/call` sub-path in the MCP spec.
-
-If tool calls return HTTP 404 or "Tool dispatch error" during the smoke test, replace the dispatch with the correct JSON-RPC format:
-
-```python
-response = httpx.post(
-    self._mcp_url,          # http://localhost:8002/mcp
-    json={
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": name, "arguments": inputs},
-    },
-    timeout=30.0,
-)
-```
-
 ### Minor — can fix after demo
 
 | File | Line | Issue |
