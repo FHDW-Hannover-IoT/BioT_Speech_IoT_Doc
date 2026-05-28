@@ -137,6 +137,34 @@ image::initialTest.png[]
 | The graph clear completely without crashing.
 | [ ] Pass +
 [ ] Fail
+
+| **TC16**
+| **Live Stream Stress Test**
+| Configure the sensor laptop/simulator to send MQTT data at a high frequency (100 Hz). Keep the app open on the live graph for 5 minutes.
+| The app handles the high data rate without crashing (no OutOfMemory exception). The UI thread does not freeze, proving that DB inserts are correctly offloaded to background threads.
+| [ ] Pass +
+[ ] Fail
+
+| **TC17**
+| **MQTT QoS Impact Analysis**
+| Change the MQTT publishing QoS on the laptop. Test sending 1000 messages at QoS 0, then QoS 1, then QoS 2. Measure the time it takes for all messages to arrive and be saved in the Room DB.
+| QoS 0 should result in the highest throughput but may drop some packets. QoS 2 should result in exactly 1000 saved DB rows, but visual latency on the graph will noticeably increase compared to QoS 0.
+| [ ] Pass +
+[ ] Fail
+
+| **TC18**
+| **Massive Historical Batch Sync**
+| Ensure the backend database has a large amount of data. Trigger `McpDataSyncService.fetchAccel()` for a 24-hour window.
+| The HTTP request fetches the massive JSON array. The parser successfully creates the objects and `insertAccelBatch()` writes them to the DB. The app does not crash from RAM exhaustion, and the LiveData observer eventually updates the UI.
+| [ ] Pass +
+[ ] Fail
+
+| **TC19**
+| **Concurrent Read/Write Pipelining**
+| While a massive historical batch sync (from TC18) is writing to the database in the background, continuously interact with the UI (e.g., rapidly toggle sensor checkboxes or zoom the graph).
+| Read operations (UI updates) and Write operations (DB batch inserts) do not cause database lock errors or deadlocks. The UI remains fully interactive while the background sync finishes.
+| [ ] Pass +
+[ ] Fail
 |===
 
 == Focus
