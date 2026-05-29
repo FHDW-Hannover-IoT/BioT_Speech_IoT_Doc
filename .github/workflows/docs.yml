@@ -8,6 +8,9 @@ on:
     types: [published]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 # Needed for Pages + Release asset upload
 permissions:
   contents: write
@@ -24,10 +27,10 @@ jobs:
     container:
       image: asciidoctor/docker-asciidoctor:1.84
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Cache asciidoctor-diagram outputs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .asciidoctor/diagram
           key: diagram-${{ hashFiles('doc/**/*.adoc') }}
@@ -61,7 +64,7 @@ jobs:
           cp -a build/pdf/*.pdf _site/pdf/ || true
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: site
           path: _site
@@ -73,13 +76,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download site artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: site
           path: _site
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: _site
 
@@ -98,7 +101,7 @@ jobs:
       contents: write
     steps:
       - name: Download site artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: site
           path: _site

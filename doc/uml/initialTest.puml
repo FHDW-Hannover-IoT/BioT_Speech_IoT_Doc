@@ -1,0 +1,48 @@
+@startuml
+skinparam componentStyle rectangle
+skinparam linetype ortho
+
+component "5 App (mobile phone)" as app {
+  database "DB" as appDB
+  port "RDP" as rdp
+}
+
+component "3 Broker" as broker
+
+component "Backend System" as backend {
+  component "6 LMM" as lmm
+  component "Server" as server {
+     database "DB (1, 2)" as serverDB
+  }
+}
+
+component "ESP" as esp {
+  database "SD" as espDB
+}
+
+component "4 Sensor Mockup" as sensor
+
+app -[#darkred]down-> broker : configuration
+broker -[#green]up-> app : publish\nsubscribe
+
+broker -[#darkred]left-> backend
+backend -[#green]right-> broker
+
+broker -[#darkred]down-> sensor
+sensor -[#green]up-> broker
+
+' ESP <-> Server
+esp -[#darkred]up-> backend : Home
+
+' --- Notizen / Beschriftungen aus der Skizze ---
+note right of broker
+  **Data transfer (red arrows)**
+  Topics, values (context dependent)
+  Naming of the Topics:
+  ""sensorTyp / sensorName / data""
+
+  **configuration (green arrows)**
+  Topic: ""data: sensorName + sensorTyp + configurationpaket""
+end note
+
+@enduml

@@ -1,32 +1,47 @@
 = Architecture Evaluation: Database Location
 
-== 1. Local on the Smartphone
-The database (Room/SQLite) resides directly on the user's Android device. The app subscribes to the MQTT broker, receives live data streams, and writes them straight to local storage.
+This section evaluates the optimal location for storing high-frequency MQTT sensor data based on key technical and architectural metrics.
 
-=== Pros
-* **Maximum Performance (Low Latency):** Loading data for graphs takes mere milliseconds. Zooming and filtering are instantaneous because there is no network overhead.
-* **Offline Capability:** Once the data is saved on the phone, the user can analyze historical graphs even offline.
-* **Privacy by Design:** Sensor data never leaves the user's device.
-* **No Server Costs:** No costs for cloud hosting or maintain backend infrastructure.
+[cols="15,40,40", options="header"]
+|===
+| Evaluation Metric
+| Local on Smartphone
+| Central Server
 
-=== Cons
-* **Battery Drain & Backgrounding Constraints:** To prevent data gaps, the app must run constantly in the background to listen to the MQTT broker. Android OS frequently kills these background processes to save battery life, leading to incomplete data.
-* **Limited Storage Capacity:** Smartphones have restricted storage. High-frequency sensor data will need a lot of storages, requiring to regularly compress old data.
-* **Risk of Data Loss:** If the phone breaks, is lost, or the app is uninstalled, all historical data is permanently destroyed.
+| *Storage Capacity*
+| **Restricted.** Smartphones have limited storage. High-frequency sensor data will quickly consume space, requiring regular compression or deletion of old data.
+| **Highly Scalable.** Capable of storing and analyzing vast datasets spanning months or years without worrying about device limits.
 
-== 2. Central Server
-Data flows from the sensors via the MQTT broker directly into a central, remote database. The Android app fetches data via an API only when requested.
+| *Data Reliability & Persistence*
+| **Vulnerable.** Permanent data loss occurs if the phone is broken or lost.
+| **Highly Reliable.** Central backups prevent data loss if a user device breaks.
 
-=== Pros
-* **Much more Storage:** It is possible to store and analyze datasets spanning months or years without worrying about the user's device storage limits.
-* **High Reliability:** The server listens to the MQTT broker all the time. The app only needs to be active when the user wants to view the data. There are no missing gaps due to battery-saving features.
-* **Offloading Compute Power:** The Douglas-Peucker reduction algorithm can run directly on the server. The server then sends only the simplified data points to the app, making the mobile application extremely lightweight and fast.
-* **MCP & AI Integration:** By attaching an MCP server to this database, the structured data can securely be exposed to AI agents.
+| *Performance & Latency*
+| **Maximum (Low Latency).** Loading data for graphs takes mere milliseconds. Zooming and filtering are instantaneous because there is no network overhead.
+| **Network Dependent.** Noticeable latency. Panning and zooming through large datasets might feel sluggish as new data batches must be fetched over the network continually.
 
-=== Cons
-* **Internet Dependency:** The app cannot display historical graphs without a stable and active internet connection.
-* **Noticeable Latency:** Panning and zooming through large datasets might feel sluggish compared to local storage, as new data batches must be fetched over the network continually.
-* **Ongoing Costs & Maintenance:** Requires renting server space, managing security, configuring backups, and developing/maintaining a backend API.
+| *Compute Load (Efficiency)*
+| **Heavy on Device.** The mobile device must process all data locally, which can drain the battery during complex calculations or rendering.
+| **Offloaded Compute.** Algorithms like the Douglas-Peucker reduction can run directly on the server. The server sends only simplified data points, making the mobile app extremely lightweight and fast.
 
-== Conclusion
-The database should be hosted on a separate server that provides data to LLMs via an integrated MCP server. This approach enables comprehensive long-term data analysis, ensures higher data security, and allows for accessibility across multiple sources.
+| *Offline Capability*
+| **Supported.** Once the data is saved on the phone, the user can analyze historical graphs fully offline.
+| **Not Supported.** The app cannot display historical graphs without a stable and active internet connection.
+
+| *Security & Privacy*
+| **Privacy by Design.** Sensor data never leaves the user's device, ensuring complete data privacy by default.
+| **Requires Management.** Data is stored centrally, requiring active security management. However, it ensures data security even if the physical end-device is compromised or lost.
+
+| *Cost & Maintenance*
+| **Zero Server Cost.** No ongoing costs for cloud hosting, and no backend infrastructure to maintain.
+| **Ongoing Costs.** Requires renting server space, managing security, configuring backups, and developing/maintaining a backend API.
+
+| *Ecosystem & AI Integration*
+| **Isolated Silo.** Data is locked on the individual device, making cross-device analysis or external integrations difficult.
+| **MCP & AI Ready.** Structured data can be securely exposed to AI agents via an integrated MCP server, enabling intelligent queries and multi-source analysis.
+|===
+
+== Decision Taken
+The central database is located on a separate server. All data is stored here and made available to the MCP server. In addition, there is a room database on the smartphone, which contains a significantly smaller volume of data. Only current data is stored here, comprising data points that have been simplified using the Douglas-Peulker algorithm. Older data is deleted regularly. If a user wishes to access data that is not stored in the app, they must enable the data connection to the server. The data retrieved from the server is not stored in the room database in order to keep the data volume compact.
+
+If data is transmitted to the smartphone via MQTT, a switch can be activated in the app so that data is transferred to the server database.

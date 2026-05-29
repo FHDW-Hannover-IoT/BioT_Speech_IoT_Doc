@@ -2,68 +2,123 @@
 ' ER-Diagramm Formatierung
 hide circle
 skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam nodesep 50
+skinparam ranksep 50
 
-entity "accel_data" as accel {
-  * id : int <<PK>> <<auto>>
-  --
-  timestamp : long
-  accelX : float
-  accelY : float
-  accelZ : float
+package "current state" #fdfdfd {
+
+    entity "accel_data" as old_accel {
+      * id : int <<PK>> <<auto>>
+      --
+      timestamp : long
+      accelX : float
+      accelY : float
+      accelZ : float
+    }
+
+    entity "gyro_data" as old_gyro {
+      * id : int <<PK>> <<auto>>
+      --
+      timestamp : long
+      gyroX : float
+      gyroY : float
+      gyroZ : float
+    }
+
+    entity "magnet_data" as old_magnet {
+      * id : int <<PK>> <<auto>>
+      --
+      timestamp : long
+      magnetX : float
+      magnetY : float
+      magnetZ : float
+    }
+
+    entity "ereignis_data" as old_ereignis {
+        * id : int <<PK>> <<auto>>
+        --
+        timestamp : long
+        sensorType : String
+        value : float
+        axis : char
+    }
+
+    entity "knownSensors" as old_knownSensors {
+        * sensorID : int <<PK>> <<auto>>
+        --
+        sensorName : String
+    }
+
+    entity "sensor (ValueSensor)" as old_valuesensor {
+          * PrimeID : int <<PK>> <<auto>>
+          --
+          BewegungX : float
+          BewegungY : float
+          BewegungZ : float
+          GyroX : float
+          GyroY : float
+          GyroZ : float
+          Zeit : String
+    }
+
+    entity "ereignis_type" as old_etype {
+        * PrimeID : int <<PK>> <<auto>>
+        --
+        ereignisName : String
+        sensorType : Sensor (Objekt!)
+        ereignisThreshold : int
+    }
+
 }
 
-entity "gyro_data" as gyro {
-  * id : int <<PK>> <<auto>>
-  --
-  timestamp : long
-  gyroX : float
-  gyroY : float
-  gyroZ : float
-}
+package "target state" #f4ffe6 {
 
-entity "magnet_data" as magnet {
-  * id : int <<PK>> <<auto>>
-  --
-  timestamp : long
-  magnetX : float
-  magnetY : float
-  magnetZ : float
-}
+    entity "Sensor" as new_sensor {
+          * sensorID : int <<PK>> <<auto>>
+          --
+          sensorName : String
+          sensorLabel : String
+    }
 
-entity "ereignis_data" as ereignis {
-  * id : int <<PK>> <<auto>>
-  --
-  timestamp : long
-  sensorType : String
-  value : float
-  axis : char
-}
+    entity "SensorData" as new_data {
+          * dataID : int <<PK>> <<auto>>
+          --
+          sensorID : int <<FK>>
+          timestamp : long
+    }
 
-entity "knownSensors" as knownSensors {
-  * sensorID : int <<PK>> <<auto>>
-  --
-  sensorName : String
-}
+    entity "SensorValue" as new_value {
+        * valueId : int <<PK>> <<auto>>
+        --
+        dataID : int <<FK>>
+        name : string
+        value : float
+    }
 
-entity "sensor (ValueSensor)" as valuesensor {
-  * PrimeID : int <<PK>> <<auto>>
-  --
-  BewegungX : float
-  BewegungY : float
-  BewegungZ : float
-  GyroX : float
-  GyroY : float
-  GyroZ : float
-  Zeit : String
-}
+    entity "EreignisType" as new_etype {
+      * typeID : int <<PK>> <<auto>>
+      --
+      sensorID : int <<FK>>
+      ereignisName : String
+      threshold : float
+    }
 
-entity "ereignis_type" {
-    * PrimeID : int <<PK>> <<auto>>
-    --
-    ereignisName : String
-    sensorType : Sensor
-    ereignisThreshold : int
-}
+    entity "EreignisLog" as new_elog {
+      * logID : int <<PK>> <<auto>>
+      --
+      typeID : int <<FK>>
+      timestamp : long
+      triggeredValue : float
+      axis : char
+    }
 
+    ' Definition der Relationen
+    new_sensor ||--o{ new_data : "1 : N"
+    new_sensor ||--o{ new_etype : "1 : N"
+    new_etype ||--o{ new_elog : "1 : N"
+    new_data ||--o{ new_value : "1 : N"
+}
+old_knownSensors -[hidden]r-> new_sensor
 
 @enduml
