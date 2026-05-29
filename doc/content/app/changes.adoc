@@ -1,0 +1,154 @@
+= Android App — Changes
+:revdate: 2026-04-24
+:toc: left
+:toc-title: Contents
+
+This document covers the changes made to the Android app across the sessions on 23–24 April 2026. The changes were identified through a full code review and then implemented.
+
+== Database switched to in-memory
+
+The Room database was changed from a persistent file-based database to an in-memory one. This was done because the app database was never meant to hold data between sessions anyway. The whole point of it is to hold live MQTT data so the charts can react in real time. Historical data that goes further back than the current session should come from the MCP server on the backend, not from the phone database. Switching to in-memory means the database automatically clears when the app closes, which is exactly the behaviour we wanted but were not explicitly coding for before.
+
+The old approach also had `fallbackToDestructiveMigration()` which would silently wipe everything on a schema change with no warning — that's gone now.
+
+== DbContext added for database writes
+
+All database writes now go through a `DbContext` class which wraps Room's `runInTransaction()`. The idea is that every write is properly wrapped in a transaction so if something goes wrong during an insert the database doesn't get left in a broken state. Before this, transactions in `DB.java` had a `beginTransaction()` but the `endTransaction()` was only called if nothing threw an exception, which could corrupt the database. This is now handled properly.
+
+== SensorRepository
+
+Activities were reaching directly into the database layer and calling the DAO and executor from `DB.java` directly. This is messy because you have logic spread across the wrong layers. `SensorRepository` is a single class that owns all database reads and writes. Activities ask the repository for data, the repository talks to the DAO through `DbContext`, and that's the only path.
+
+This also means the `public static final databaseWriteExecutor` field in `DB.java` is gone — nothing outside the database layer needs to know about that anymore.
+
+== Database package moved to the correct namespace
+
+The database classes were in a package called `database.*` which is completely outside the app namespace. This was causing ProGuard issues and just looks wrong. All the entity and DAO files are now under `com.fhdw.biot.speech.iot.database.*` where they belong.
+
+== BiotApplication added
+
+`AppContainer` was being created inside `MainActivity.onCreate()`. The problem with this is that Android recreates activities on screen rotation. Every time someone rotated the phone, a new `AppContainer` was created which meant a new MQTT connection was opened and the old one was dropped. The connection would then reconnect, adding delays and unnecessary reconnects.
+
+The fix is a `BiotApplication` class that extends `Application`. `AppContainer` is created once in `BiotApplication.onCreate()` and lives for the entire process. `MainActivity` just fetches it from the application class instead of creating a new one. Rotation no longer causes any MQTT disruption.
+
+`AppContainer` also moved from `di/` to `config/` — all the configuration and DI-related classes are now in one place.
+
+== Observer pattern for LLM responses
+
+The `LlmQueryHandler` previously held a reference to the `Activity`. This created a circular dependency where the LLM layer needed to know about UI classes to navigate between screens. It also meant the handler was not safe across rotations since the Activity reference could go stale.
+
+The handler was refactored to post results to a `MutableLiveData<LlmAction>` instead of dispatching directly. `MainActivity` observes this LiveData and handles navigation, MQTT publish, filter broadcast, and TTS when a result arrives. The LLM handler itself is now application-scoped — it is created once and never needs to be recreated.
+
+The result from the user's perspective is the same. Internally it is much cleaner.
+
+== McpDataSyncService for historical data
+
+When a user applies a date filter that goes back further than the current session's data, the app needs to fetch from the MCP server on the Python backend. `McpDataSyncService` handles this. It sends the HTTP request on a background thread, inserts the results into the in-memory Room database through `SensorRepository`, and posts the result to a `MutableLiveData`. Activities observe this and the charts update when the data arrives. Nothing blocks.
+
+The endpoints are wired to the confirmed FastAPI routes on the LLM app:
+
+* `GET {baseUrl}/data/accel?from={fromMs}&to={toMs}`
+* `GET {baseUrl}/data/gyro?from={fromMs}&to={toMs}`
+* `GET {baseUrl}/data/magnet?from={fromMs}&to={toMs}`
+
+Response shape: `{"rows": [{"timestamp": ms, "x": f, "y": f, "z": f}, ...]}` — matches the `SensorDataResponse` the FastAPI server produces.
+
+== MQTT handler cleanup
+
+`MqttHandler` had two problems. First, all logging used `System.out.println` which does not appear in Android Logcat at all, making it impossible to debug MQTT issues on a real device. All logging is now through `Log.d/i/w/e` with a `TAG` constant.
+
+Second, every operation (connect, subscribe, publish, disconnect) was spinning up its own raw `Thread`. This meant thread creation was happening without any lifecycle management. Everything is now submitted to a single `ExecutorService` that shuts down cleanly when `disconnect()` is called.
+
+`MqttHandler` also now exposes a `LiveData<Boolean>` for connection status so the UI can react when the MQTT connection state changes without polling `isConnected()`.
+
+== Config values moved to BuildConfig
+
+Four values were hardcoded in source files that should be configurable at build time. These are now in `app/build.gradle` as `buildConfigField` entries and can be overridden in `gradle.properties` without touching any Java files:
+
+* `SIMULATOR_FALLBACK_DELAY_MS` — how long to wait before starting the simulator if no MQTT data arrives (was hardcoded as 5000 ms in MainActivity)
+* `SIMULATOR_INTERVAL_MS` — how often the simulator publishes fake data (was hardcoded as 500 ms)
+* `LLM_CONNECT_TIMEOUT_MS` — HTTP connect timeout for LLM calls (was hardcoded as 5000 ms)
+* `LLM_READ_TIMEOUT_MS` — HTTP read timeout for LLM calls (was hardcoded as 30000 ms)
+
+== What is still outstanding (from 23 April session)
+
+These items were identified in the review but not yet implemented:
+
+* `BaseChartActivity` absorbing the sliding-window and date-filter logic that is copy-pasted across `AccelActivity`, `GyroActivity`, and `MagnetActivity`
+* Generic `buildSensorDataSets()` helper in `MainGraphActivity` to remove the three near-identical data initialiser methods
+* Wiring the `observeAccelData/Gyro/Magnet()` methods in `MainGraphActivity` to call `McpDataSyncService` when the date filter goes beyond what is in the live in-memory database
+* Minor cleanup: rename `updateAccelChart()` to `updateAllSensorCharts()`, remove the duplicate date format method in `AccelActivity`, remove the unused `DatePickerHandler` local variable
+
+== MQTT duplicate-connect bug fix (24 April 2026)
+
+When the user changed language in `SettingsActivity`, Android's `recreate()` destroyed and re-created `SettingsActivity` on the back stack. The home button then called `startActivity(new Intent(..., MainActivity.class))` with no flags, so `LAUNCH_MULTIPLE` created a _new_ `MainActivity` on top of the existing one. The new `MainActivity.onCreate()` called `connectMqtt()` on the already-connected `MqttHandler` still held in `AppContainer`. Paho throws error 32100 ("Client is already connected") in this case. The `onFailure()` callback then fired, showing an error toast and starting the simulator even though MQTT was working fine.
+
+Two fixes were applied:
+
+. `MqttHandler.connect()` — added an `isConnected()` guard at the start of the executor task. If the Paho client is already connected, `onConnected()` is called immediately and the method returns. This prevents 32100 from ever being thrown regardless of how many times `connect()` is called.
+
+. `SettingsActivity` home button — changed from a bare `startActivity()` to one with `Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP`. This brings the existing `MainActivity` to the front instead of stacking a new instance on top of it.
+
+== Language change now propagates to all screens (24 April 2026)
+
+After fixing the duplicate-connect crash, a second bug was found: the language change only applied to `SettingsActivity` itself. Every other screen (`MainActivity`, `AccelActivity`, etc.) continued showing the old language.
+
+The root cause: `recreate()` only recreates the _calling_ Activity. All other Activities in the back stack were created with the old locale baked into their `Context` via `BiotBaseActivity.attachBaseContext()`. They never went through `attachBaseContext()` again, so their string resources were never re-inflated in the new locale.
+
+The fix: replace `recreate()` with a full task restart. When the user selects a new language, `LanguageManager.save()` is called and then a `MainActivity` intent is started with `FLAG_ACTIVITY_CLEAR_TASK | FLAG_ACTIVITY_NEW_TASK`. This destroys every Activity in the current task, then starts a fresh `MainActivity`. Every Activity created from that point forward goes through `BiotBaseActivity.attachBaseContext()` → `LanguageManager.applyLocale()` → correct locale. The language change is now immediate and complete across the entire app.
+
+== McpDataSyncService refactored to remove duplicate fetch methods (24 April 2026)
+
+`McpDataSyncService` had three structurally identical public methods (`fetchAccel`, `fetchGyro`, `fetchMagnet`) and three structurally identical private parse methods (`httpGetAccel`, `httpGetGyro`, `httpGetMagnet`) — ninety lines of near-copy-paste where only the field names differed.
+
+The fix: extracted a generic `fetchSensor()` method and a `httpGetSensor()` method that take a `RowMapper<T>` functional interface. Each public `fetch*` method now supplies a one-line lambda that maps the JSON row to the correct entity. The three duplicate method pairs are gone. The behaviour is identical.
+
+== VoiceCommandExecutor VIEW_MODE string constants (24 April 2026)
+
+The `COMBINED_*` voice commands in `VoiceCommandExecutor` passed the strings `"MOTION"`, `"VIBRATION_SOUND"`, `"ORIENTATION_MAGNETIC"`, and `"ALL"` as inline literals to `MainGraphActivity` via an Intent extra. If `MainGraphActivity` ever renames these mode strings, the executor would silently break.
+
+Four `public static final String` constants (`VIEW_MOTION`, `VIEW_VIBRATION_SOUND`, `VIEW_ORIENTATION_MAGNETIC`, `VIEW_ALL_SENSORS`) were added to `VoiceCommandExecutor` and the inline literals replaced. `MainGraphActivity` should reference these constants when reading the Intent extra.
+
+== Multilingual voice commands via ML Kit translate-first (24 April 2026)
+
+=== The problem
+
+The voice command dictionary had two separate problems for non-English languages.
+
+For Chinese, it was completely broken: the `VoiceCommandResolver.normalise()` method stripped all characters outside `[a-zäöüß0-9]`, which means every Chinese character became a space. Every Chinese voice command resolved to `UNKNOWN` before even reaching the dictionary.
+
+For German, it mostly worked but only because the original dictionary had German keywords mixed in alongside English ones (`beschleunigung`, `gyroskop`, `zeige`, etc.). Adding any new command required updating keywords in every language, and the coverage was inconsistent.
+
+The core design flaw was that the dictionary tried to carry all the multilingual burden itself.
+
+=== The solution — translate first, match English only
+
+A `TranslationManager` class was added to the voice package. It sits in the pipeline between `VoiceInputManager` (STT output) and `VoiceCommandResolver` (keyword matching). When the app language is German or Chinese, it translates the full list of STT hypotheses into English using Google ML Kit's on-device translation API before passing them to the resolver.
+
+ML Kit downloads the language model (~30 MB per language pair) on first use and caches it on the device. All subsequent translations are offline. The translation step adds roughly 50–100 ms on the first call after a cold start; subsequent calls are faster because the model is warm.
+
+The dictionary now only needs English keywords. Adding a new language in the future requires one line in `TranslationManager.LANG_TO_MLKIT` — no keyword changes anywhere.
+
+`UNKNOWN` commands forwarded to the LLM still use the original untranslated transcript, not the English translation, so the LLM receives the full context in the user's own language.
+
+=== Files changed
+
+* `app/build.gradle` — added `com.google.mlkit:translate:17.0.3`
+* `voice/TranslationManager.java` — new class, wraps ML Kit, caches translators per language
+* `config/AppContainer.java` — `TranslationManager` added to application scope
+* `main/MainActivity.java` — `initVoiceInputManager()` now calls `translationManager.translateAll()` before resolving; resolve+execute logic extracted into `resolveAndExecute()`
+
+== Activity back stack fixed — no duplicate instances (24 April 2026)
+
+Multiple instances of `MainActivity` and `AccelActivity` were piling up in the back stack (confirmed in logcat: 4+ copies of each being force-removed on process death). The cause was that all `startActivity()` calls used the default `standard` launch mode with no flags, so every navigation — whether from the voice command handler or the on-screen buttons — created a fresh instance of the target activity even if it was already in the stack.
+
+Two fixes:
+
+* All button navigation in `MainActivity.bindNavigationButtons()` now goes through a shared `navigateTo()` helper that adds `FLAG_ACTIVITY_REORDER_TO_FRONT`. This brings an existing instance to the front rather than stacking a new one.
+* `handleNavigate()` (used by LLM-dispatched voice navigation commands) also uses `FLAG_ACTIVITY_REORDER_TO_FRONT` for all screens except `MainActivity`, where `FLAG_ACTIVITY_CLEAR_TOP | FLAG_ACTIVITY_SINGLE_TOP` is used to unwind the back stack back to the root.
+
+== Language loading screen (24 April 2026)
+
+A fake loading screen was added to `SettingsActivity`. When the user selects a different language, instead of restarting the task immediately, a full-screen dialog appears with an indeterminate spinner and a localised "loading language" message. After 5 seconds the dialog dismisses and the task restarts.
+
+The loading message is provided in all three supported languages in the respective `strings.xml` files. The dialog uses `Theme_Black_NoTitleBar_Fullscreen` and is non-cancelable. A `Handler.postDelayed` fires the restart; the callback is cancelled in `onDestroy` so there is no window-leak if the user navigates away during the 5-second wait.

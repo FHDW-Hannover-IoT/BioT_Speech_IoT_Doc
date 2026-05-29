@@ -1,0 +1,262 @@
+= Voice Pipeline
+:toc: left
+:toc-title: Contents
+:sectnums:
+:icons: font
+
+This document explains the complete voice pipeline in the BioT Speech IoT app — from the user speaking, through speech recognition, intent matching, action execution, and spoken response.
+
+== Overview
+
+The voice system turns spoken words into app actions. It is entirely self-contained inside the `com.fhdw.biot.speech.iot.voice` package. Everything runs on-device using Android's built-in speech recognition and text-to-speech engines.
+
+The full pipeline:
+
+----
+User speaks  (any supported language)
+    |
+SpeechRecognizer (Android built-in, language-aware)
+    |  transcript as plain text in the app language
+TranslationManager  (Google ML Kit, on-device)
+    |  transcript normalised to English
+    |  (no-op when app language is English)
+VoiceCommandResolver  <--  VoiceCommandDictionary (English keyword rules)
+    |  matched VoiceCommand enum value
+VoiceCommandExecutor
+    |  calls the right app action
+Navigate screen / Filter chart / Change MQTT mode / etc.
+    |
+TtsManager speaks the result back to the user
+----
+
+The key design decisions:
+
+* `VoiceCommandResolver` has no Android dependencies — it just takes a string and returns a `VoiceCommand`. This means it can be unit tested without an Android emulator running.
+* The keyword dictionary only needs English keywords. All other languages are handled by translating to English first, so adding a new language never requires updating the dictionary.
+* Unknown commands are forwarded to the LLM using the *original* untranslated transcript, so the LLM receives the full context in the user's actual language.
+
+== Package Structure
+
+[source]
+----
+com.fhdw.biot.speech.iot.voice/
+├── VoiceCommand.java           -- enum of every possible command intent
+├── VoiceCommandDictionary.java -- maps English keywords to VoiceCommand values
+├── VoiceCommandResolver.java   -- matches a transcript to a VoiceCommand
+├── VoiceCommandExecutor.java   -- executes the matched command in the app
+├── VoiceInputManager.java      -- wraps Android SpeechRecognizer
+├── TranslationManager.java     -- translates non-English transcripts to English (ML Kit)
+└── TtsManager.java             -- wraps Android TextToSpeech
+----
+
+Three interfaces let the executor talk to other parts of the app without depending on concrete classes:
+
+[source]
+----
+com.fhdw.biot.speech.iot.mqtt/
+└── IMqttPublisher.java         -- publish MQTT commands without touching MqttHandler directly
+
+com.fhdw.biot.speech.iot.graph/
+└── IFilterableChart.java       -- apply date filters to charts
+
+com.fhdw.biot.speech.iot.voice/
+└── ILlmQueryHandler.java       -- forward unknown transcripts to the LLM
+----
+
+== VoiceInputManager — Speech to Text
+
+`VoiceInputManager` wraps Android's `SpeechRecognizer` to provide a push-to-talk interface without the standard Google dialog popup. The mic button itself turns red while listening.
+
+Android's `SpeechRecognizer` is completely separate from the KY-037 hardware microphone on the ESP8266. The KY-037 sends sound level data over MQTT. The phone mic is used by SpeechRecognizer to capture voice commands. These are two entirely independent systems.
+
+Android returns a list of possible transcriptions ranked by confidence. `VoiceCommandResolver` checks all of them (up to 5) and returns the first match. This helps with accents and speech recognition variations.
+
+`VoiceInputManager` must be:
+
+* Created on the main thread (Android requirement)
+* Destroyed in `onDestroy` to avoid leaks
+* Only one listening session at a time (`startListening` is a no-op if already listening)
+
+== TranslationManager — Multilingual Support
+
+`TranslationManager` sits between `VoiceInputManager` and `VoiceCommandResolver`. It translates the STT hypothesis list from whatever language the user spoke into English before the keyword dictionary is consulted.
+
+=== Why translate instead of maintaining per-language keywords
+
+Writing keyword sets for every language is the obvious first approach, but it breaks down quickly:
+
+* Technical terms (sensor names, mode names) do not always have obvious translations and often differ between formal and spoken registers.
+* Chinese characters would be stripped by the normaliser entirely since it only passes ASCII and German umlauts through.
+* Every time a new command is added, every language's keyword list has to be updated.
+
+The translate-first approach collapses all languages into a single English matching path. The dictionary never needs to change when a new language is added.
+
+=== How it works
+
+`TranslationManager` uses Google ML Kit on-device translation. Models are downloaded once (~30 MB per language pair) and then cached on the device — all subsequent translations are fully offline.
+
+[source]
+----
+User says "Gyroskop anzeigen"  (German UI)
+    |
+SpeechRecognizer  →  ["Gyroskop anzeigen", "zeige Gyroskop", ...]
+    |
+TranslationManager (DE → EN)
+    →  ["Show gyroscope", "show gyroscope", ...]
+    |
+VoiceCommandResolver
+    →  VoiceCommand.NAV_GYRO  ✓
+----
+
+If the model download fails or a translation errors out, the manager falls back to the original hypothesis text so the LLM fallback path still has something to work with.
+
+=== Supported source languages
+
+[options="header",cols="1,2,3"]
+|===
+| App language code | ML Kit model | Notes
+| `de` | `TranslateLanguage.GERMAN` | Downloaded on first use
+| `zh` | `TranslateLanguage.CHINESE` | Simplified Chinese, downloaded on first use
+| `en` | — | No translation, `isNeeded()` returns false
+|===
+
+=== LLM forwarding and the original transcript
+
+Commands that resolve to `UNKNOWN` are forwarded to the LLM. The LLM receives the *original* untranslated transcript — not the English translation — so it gets the full natural-language context in the user's own language. The LLM understands all three supported languages natively.
+
+== VoiceCommandDictionary — Keyword Rules
+
+`VoiceCommandDictionary` is where every supported command is defined as a set of English keyword rules. Because `TranslationManager` normalises all input to English first, only English keywords are needed here.
+
+=== How matching works
+
+Each command has one or more keyword groups. A transcript must contain at least one word from each group for the command to match. Groups are ANDed together; words within a group are ORed.
+
+Example — navigating to the gyroscope screen:
+
+[source,java]
+----
+// transcript must contain one of: "gyro", "gyroscope", "rotation", "spin"
+Rule.of(VoiceCommand.NAV_GYRO,
+    new String[]{"gyro", "gyroscope", "rotation", "spin"})
+----
+
+With the translate-first approach, a German user saying "Gyroskop anzeigen" arrives at the resolver as "show gyroscope", which matches cleanly on "gyroscope". A Chinese user saying "显示陀螺仪" arrives as "show gyroscope" for the same result.
+
+Advantages of this approach:
+
+* No internet required after the first model download — all matching is local
+* Works for any language ML Kit can translate to English (58 languages)
+* Dictionary stays simple and English-only
+* Transparent — you can read exactly what words trigger what command
+
+Rule ordering matters. The resolver returns the first match, so more specific rules must sit above more general ones.
+
+== VoiceCommandResolver — Intent Matching
+
+`VoiceCommandResolver` is a stateless class that takes a transcript string (or list of hypotheses) and returns the best matching `VoiceCommand`.
+
+The transcript is normalised before matching: lowercased, punctuation stripped, whitespace collapsed. The resolver has no Android imports — it only uses `java.util` and `java.lang` — so it can be unit tested with plain JUnit:
+
+[source,java]
+----
+@Test
+public void testGyroNavigation() {
+    VoiceCommand result = VoiceCommandResolver.resolve("zeige gyroskop");
+    assertEquals(VoiceCommand.NAV_GYRO, result);
+}
+----
+
+== VoiceCommand Enum — All Available Commands
+
+`VoiceCommand` is the fixed list of everything the system can recognise:
+
+[options="header",cols="2,3"]
+|===
+| Group | Commands
+| Navigation | `NAV_HOME`, `NAV_ACCEL`, `NAV_GYRO`, `NAV_MAGNET`, `NAV_GRAPH`, `NAV_EVENTS`, `NAV_SETTINGS`
+| Time filters | `FILTER_LAST_5MIN`, `FILTER_LAST_10MIN`, `FILTER_LAST_30MIN`, `FILTER_LAST_1H`, `FILTER_LAST_24H`, `FILTER_CLEAR`
+| Nav + filter combos | `NAV_ACCEL_FILTER_10MIN`, `NAV_GYRO_FILTER_10MIN`, `NAV_MAGNET_FILTER_10MIN`
+| Transmission mode | `MODE_STREAM`, `MODE_BURST`, `MODE_AVERAGE` (publishes to `Control/Mode`)
+| Operating mode | `OPMODE_AUTARK`, `OPMODE_SUPERVISION`, `OPMODE_EVENT`, `OPMODE_IDENTIFICATION` (publishes to `Control/OperatingMode`)
+| System | `SYSTEM_HELP`, `UNKNOWN`
+|===
+
+`UNKNOWN` means nothing in the dictionary matched. The executor forwards the raw transcript to the LLM for intelligent handling.
+
+== VoiceCommandExecutor — Executing Actions
+
+`VoiceCommandExecutor` receives a resolved `VoiceCommand` and carries it out. It takes the resolved command, an `IMqttPublisher`, an `ILlmQueryHandler`, the raw transcript, and the calling `Activity`.
+
+It returns `true` if the command was handled locally, `false` if it was forwarded to the LLM. `MainActivity` uses this return value to decide whether to speak a confirmation (local commands get a short TTS confirmation; LLM-forwarded commands let the LLM produce the spoken response).
+
+Every action either calls `startActivity`, `mqtt.publish`, `sendBroadcast`, or `tts.speak` — all the side effects are in one place.
+
+== TtsManager — Text to Speech
+
+`TtsManager` wraps Android's `TextToSpeech` and adds a pending utterance queue. This solves a common problem: `TextToSpeech` initialises asynchronously, so if you call `speak()` before it is ready, the speech is silently dropped.
+
+The manager queues any `speak()` call that arrives before init completes and speaks it once ready.
+
+`QUEUE_FLUSH` is used for all utterances — this interrupts any currently speaking text and starts the new text immediately. For voice command confirmations this is the right behaviour: you always want the immediate response.
+
+Language is set to `Locale.ENGLISH` but falls back to German pronunciation for German words. Change `tts.setLanguage()` in `TtsManager` if you want a fully German voice.
+
+== LLM Forwarding
+
+Commands that resolve to `UNKNOWN` are forwarded to the LLM via `ILlmQueryHandler.handleQuery(transcript)`.
+
+The LLM handles everything the keyword dictionary cannot:
+
+* Ambiguous or conversational phrasing ("what's been happening with the accelerometer today?")
+* Multi-part questions ("show me the last 10 minutes of gyro data and tell me if anything looks unusual")
+* Entity extraction ("set epsilon to 0.5 for gyro Y axis")
+* Follow-up context and explanation requests
+
+The LLM response comes back as a structured JSON action (see `doc/content/llm_app/llm_use_cases.adoc` for the schema). `MainActivity` observes the `liveAction` LiveData and dispatches the result: navigate, MQTT publish, filter, or speak.
+
+== Observer Pattern for LLM Results
+
+`LlmQueryHandler` is application-scoped (survives rotation). It runs HTTP on a background thread and posts results to a `MutableLiveData<LlmAction>` held in `AppContainer`.
+
+`MainActivity` observes this LiveData:
+
+[source,java]
+----
+container.liveAction().observe(this, action -> {
+    speak(action.tts);
+    switch (action.type) {
+        case NAVIGATE:     handleNavigate(action.screen); break;
+        case MQTT_PUBLISH: handleMqttPublish(action.topic, action.payload); break;
+        case APPLY_FILTER: broadcastFilter(action.minutes); break;
+        case CLEAR_FILTER: broadcastFilter(0); break;
+        case ANSWER:       break; // TTS already handled
+    }
+});
+----
+
+Nothing blocks. The voice button tap returns immediately. The LLM result arrives asynchronously and the UI updates when ready.
+
+== Adding New Commands
+
+Four files need to be updated:
+
+. Add the enum value to `VoiceCommand.java`
+. Add a `Rule.of(...)` to `VoiceCommandDictionary.java` — English keywords only, place it before any rule that would otherwise match the same keywords
+. Add a `case` in `VoiceCommandExecutor.execute(...)` that performs the action
+. Add a confirmation phrase in `MainActivity.toConfirmation(...)`
+. If the command needs the LLM (entity extraction, conversational), update `llm_app/llm_use_cases.adoc` and the system prompt in `agent.py`
+
+Adding support for a new *language* only requires adding its ML Kit language code to `TranslationManager.LANG_TO_MLKIT` and adding a language option in `SettingsActivity`. No keyword changes are needed.
+
+== Emulator vs Real Device
+
+[options="header",cols="2,2,2"]
+|===
+| | Android Emulator | Real Android Phone
+| STT method | Shows dialog | Background SpeechRecognizer (no popup)
+| Microphone | Laptop mic via emulator | Phone mic directly
+| TTS | Works identically | Works identically
+|===
+
+Both paths feed into the same resolution and execution logic so the pipeline is completely shared.

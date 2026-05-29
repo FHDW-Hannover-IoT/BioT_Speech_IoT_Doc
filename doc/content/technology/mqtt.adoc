@@ -1,0 +1,140 @@
+= How MQTT Works in BioT Speech IoT
+:toc: left
+:toc-title: Contents
+:sectnums:
+:icons: font
+
+This document explains how the BioT Speech IoT system uses MQTT to move sensor data from the ESP8266 hardware to the Android app and the LLM backend. No prior knowledge of message brokers required.
+
+== What is MQTT?
+
+MQTT stands for Message Queuing Telemetry Transport. In plain terms:
+
+Imagine a walkie-talkie radio system. One person talks on a channel and everyone who is tuned to that channel hears it. Nobody calls anyone directly — you just broadcast on a channel and whoever is listening will receive it.
+
+MQTT works exactly like that, except over Wi-Fi instead of radio waves. It was originally designed for IoT devices because it is extremely lightweight and works even on tiny microcontrollers like the ESP8266.
+
+== The Three Players
+
+Every MQTT system has exactly three types of participant:
+
+----
+Publisher (ESP8266)  -->  Broker (Mosquitto)  -->  Subscriber (App / LLM backend)
+----
+
+*The Publisher* — the device that sends messages. In this project that is the ESP8266 NodeMCU. It reads sensor values and sends them out.
+
+*The Broker* — the middleman that sits in between. It receives every message and forwards it to whoever is interested. In this project that is Mosquitto, running on your PC. The broker does not care what the messages contain, it just routes them.
+
+*The Subscriber* — the device that receives messages. In this project that is the Android app and the LLM backend's MQTT subscriber. They tell the broker which topics they are interested in, and the broker sends them everything published on those topics.
+
+NOTE: The ESP8266 and the Android app never talk to each other directly. They both only talk to Mosquitto. Mosquitto is the bridge between them.
+
+== Topics — The Address System
+
+A topic is like a channel name for a message. Topics in MQTT use forward slashes to create a hierarchy:
+
+----
+Sensor/Bewegung
+Sensor/Gyro
+Sensor/Magnet
+Control/Mode
+Control/OperatingMode
+----
+
+The ESP8266 publishes to sensor topics. Both the Android app and the LLM backend subscribe to those same topics. The app also publishes to `Control/Mode` and `Control/OperatingMode` to send commands back to the ESP8266.
+
+== How This Project Uses MQTT
+
+=== Sensor data (ESP8266 to subscribers)
+
+[options="header",cols="2,2,3"]
+|===
+| Topic | Payload format | Example
+| `Sensor/Bewegung` | `x,y,z` floats (g-force) | `1.23,-0.45,9.81`
+| `Sensor/Gyro` | `x,y,z` floats (deg/s) | `-0.94,4.50,-4.06`
+| `Sensor/Magnet` | `x,y,z` floats | `0.00,0.00,1.00`
+|===
+
+Both the Android app (writing to Room DB) and the LLM backend's MQTT subscriber (writing to SQLite) receive all sensor topics. They share an identical database schema so the LLM can query data in the same way regardless of which database it hits.
+
+=== Control commands (app to ESP8266)
+
+[options="header",cols="2,3,3"]
+|===
+| Topic | Payload values | Retained?
+| `Control/Mode` | `STREAM`, `BURST`, `AVERAGE` | Yes
+| `Control/OperatingMode` | `AUTARK`, `SUPERVISION`, `EVENT`, `IDENTIFICATION` | Yes
+|===
+
+Retained messages mean the broker keeps the last value and delivers it immediately to any new subscriber — so the ESP8266 picks up its last mode after a restart without needing the app to resend.
+
+=== Transmission mode vs. operating mode
+
+These are two separate concepts that publish on separate topics.
+
+[options="header",cols="2,3,3"]
+|===
+| Concept | What it controls | Topic
+| Transmission mode | How often the ESP8266 publishes (Stream = every reading, Burst = every 5 s batch, Average = one averaged value every 5 s) | `Control/Mode`
+| Operating mode | What the ESP8266 is doing (Autark = power saving, Supervision = stream all, Event = only on threshold crossings, Identification = record everything) | `Control/OperatingMode`
+|===
+
+You can be in Supervision mode at Burst cadence — they are orthogonal.
+
+=== Burst payload handling
+
+In Burst mode the ESP8266 collects 5 seconds of readings and sends them all in one message. The payload for `Sensor/Bewegung`, `Sensor/Gyro`, `Sensor/Magnet` concatenates multiple triplets:
+
+----
+1.23,-0.45,9.81,1.24,-0.46,9.80,1.25,-0.45,9.79
+----
+
+Both the Android app and the LLM backend subscriber split these in groups of three and insert one row per triplet.
+
+== QoS — Delivery Guarantees
+
+This project uses QoS 1 (at least once) for everything.
+
+[options="header",cols="1,2,3"]
+|===
+| Level | Name | What it means
+| QoS 0 | At most once | Fire and forget, message may be lost
+| QoS 1 | At least once | Guaranteed to arrive, but may arrive twice
+| QoS 2 | Exactly once | Guaranteed exactly once (slowest)
+|===
+
+QoS 1 means every message is guaranteed to reach the broker and be delivered to every subscriber at least once. Duplicate sensor readings occasionally happen but they are harmless — the next reading arrives within milliseconds and overwrites the display.
+
+== Keep-Alive
+
+The ESP8266 tells Mosquitto on connection: "I will send you a ping at least every 120 seconds to prove I am still alive." This prevents Mosquitto from dropping the connection during the 5-second silences in Burst and Average modes.
+
+[source,cpp]
+----
+mqtt.setKeepAlive(120);
+----
+
+The Paho MQTT library on the Android side and the paho-mqtt library on the Python side both handle keep-alive automatically.
+
+== What Happens When Something Goes Wrong
+
+*If the ESP8266 loses Wi-Fi:* its `connectMQTT()` function retries automatically. Once back online it subscribes to `Control/Mode` again and Mosquitto immediately delivers the retained mode message.
+
+*If the Android app loses connection:* Paho's `automaticReconnect = true` silently reconnects in the background. Once reconnected it re-subscribes to all topics and receives the retained mode messages so the UI buttons update.
+
+*If Mosquitto is stopped:* Both the ESP8266 and both subscriber clients will report a connection failure and keep retrying. Once Mosquitto restarts, all three reconnect within a few seconds.
+
+*If the LLM backend's subscriber disconnects:* it reconnects automatically with a 5-second backoff. No MQTT messages are lost from the broker's perspective during the reconnection window — QoS 1 ensures redelivery.
+
+== Mosquitto Setup
+
+See `app/README.adoc` for the full setup guide including Windows firewall configuration. The short version:
+
+[source]
+----
+listener 1883
+allow_anonymous true
+----
+
+Add these two lines to `mosquitto.conf`, restart Mosquitto, open port 1883 TCP inbound in the Windows Firewall.

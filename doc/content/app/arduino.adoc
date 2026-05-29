@@ -1,0 +1,218 @@
+= ESP8266 Firmware
+:toc: left
+:toc-title: Contents
+:sectnums:
+:icons: font
+
+This document explains how the ESP8266 NodeMCU firmware works in the BioT Speech IoT project. No prior hardware or embedded programming knowledge required.
+
+== What the ESP8266 Does
+
+The ESP8266 is a tiny microcontroller — a miniature computer on a chip. The development board used in this project is the NodeMCU ESP-12E, which adds a USB port and pin headers to make the chip easy to wire up.
+
+It has two abilities that make it right for this project: it can run code (like reading a sensor every 20 milliseconds), and it has built-in Wi-Fi to send those readings over the network.
+
+The ESP8266 does three things in this project:
+
+. Reads sensor values from the connected hardware
+. Connects to the Mosquitto broker over Wi-Fi
+. Publishes those values to MQTT topics so the Android app and LLM backend can receive them
+
+== Arduino IDE
+
+Arduino IDE is the application used to write code for the ESP8266 and upload it. The language is C++ with a simplified structure.
+
+Every Arduino program has exactly two required functions:
+
+[source,cpp]
+----
+void setup() {
+    // runs once when the board powers on
+}
+
+void loop() {
+    // runs over and over forever
+}
+----
+
+`setup()` initialises everything — connects to Wi-Fi, sets up MQTT, configures pins. Then `loop()` runs in an infinite cycle doing the actual work: reading sensors, publishing data, checking for incoming commands.
+
+The ESP8266 runs `loop()` thousands of times per second. In this project it is deliberately slowed down using timers so sensors are only sampled at the right intervals (20 ms for the mic, 100 ms for other sensors).
+
+== Pin Layout and Sensor Connections
+
+=== MPU-6050 (Accelerometer + Gyroscope)
+
+[options="header",cols="2,2,3"]
+|===
+| MPU-6050 pin | NodeMCU pin | Purpose
+| `VCC` | `3V3` | 3.3V power
+| `GND` | `GND` | Ground
+| `SCL` | `D1` (GPIO5) | I2C clock signal
+| `SDA` | `D2` (GPIO4) | I2C data signal
+|===
+
+I2C is a communication protocol that lets two devices talk using two wires — one for timing (clock) and one for data. The MPU-6050 uses I2C to send accelerometer and gyroscope readings to the ESP8266. The library handles all the protocol details.
+
+=== A3144 (Hall Effect / Magnet Sensor)
+
+[options="header",cols="2,2,3"]
+|===
+| A3144 pin | NodeMCU pin | Purpose
+| `VCC` | `3V3` | 3.3V power
+| `GND` | `GND` | Ground
+| `OUT` | `D5` (GPIO14) | Digital output — HIGH or LOW depending on magnet
+|===
+
+The A3144 detects magnetic fields. When a magnet is close, the output pin goes LOW (0). When there is no magnet, it stays HIGH (1).
+
+NOTE: Always use `3V3`, not `5V` or `VIN`. The ESP8266 operates at 3.3V and so do all sensors in this project. Using 5V would damage them.
+
+== Code Structure
+
+The firmware is one `.ino` file split into logical sections:
+
+----
+Configuration constants (broker URL, pins, timing)
+    |
+Mode state (STREAM / BURST / AVERAGE)
+    |
+Buffers and accumulators (for burst and average modes)
+    |
+connectWiFi()   — connects to router
+connectMQTT()   — connects to Mosquitto, subscribes to Control/Mode
+    |
+readAccel()     — reads MPU-6050 accelerometer (X, Y, Z in g)
+readGyro()      — reads MPU-6050 gyroscope (X, Y, Z in deg/s)
+readHall()      — reads A3144 (digital 0 or 1)
+    |
+publishAccel()  — formats and sends accel data
+publishGyro()   — formats and sends gyro data
+publishHall()   — formats and sends hall data
+    |
+sendBurst()     — sends collected batch data at 5-second mark
+sendAverage()   — sends computed averages at 5-second mark
+    |
+setup()         — runs once on boot
+loop()          — runs forever
+----
+
+== The Three Transmission Modes
+
+The mode controls how data is sent to the MQTT broker. The Android app can switch modes by publishing to `Control/Mode`.
+
+=== Stream (default)
+
+Every reading is published immediately as it is taken. Accel and gyro publish every 100 ms.
+
+Good for real-time monitoring and demos.
+
+=== Burst
+
+Readings are collected for 5 seconds, then sent all at once in a single large payload. Multiple `x,y,z` triplets are concatenated into one message string:
+
+----
+1.23,-0.45,9.81,1.24,-0.46,9.80,1.25,-0.45,9.79
+----
+
+Both the Android app and the LLM backend subscriber split these in groups of three.
+
+Good for reducing network traffic while preserving raw data.
+
+=== Average
+
+Like burst but instead of storing every reading it keeps a running sum and count. At the 5-second mark it divides to get the average and sends that single value.
+
+Good for minimal data transmission and trend monitoring.
+
+=== Switching modes
+
+When the Android app publishes `BURST` to `Control/Mode`, the ESP8266's callback fires and calls `setMode(MODE_BURST)` which resets all buffers immediately so there is no stale data from the previous mode.
+
+== Timing — How the Loop Works
+
+The `loop()` function runs as fast as the ESP8266 can execute it. Sampling sensors on every iteration would flood the broker. Instead the code uses elapsed time checks to create independent timers:
+
+[source,cpp]
+----
+unsigned long lastSampleSlow = 0;
+
+void loop() {
+    mqtt.loop();  // always first — keeps connection alive
+
+    unsigned long now = millis();
+
+    // Accel/Gyro/Hall: sample every 100ms
+    if (now - lastSampleSlow >= 100) {
+        lastSampleSlow = now;
+        // read and handle sensors
+    }
+
+    // Burst/Average: send every 5000ms
+    if (currentMode != MODE_STREAM && now - lastWindow >= 5000) {
+        lastWindow = now;
+        // send collected data
+    }
+}
+----
+
+`millis()` returns the number of milliseconds since the board powered on. By storing the last time something happened and comparing it to `now`, you get independent timers that never block the loop. Using `delay(100)` would freeze the entire program and prevent MQTT from receiving mode change commands.
+
+== Startup Sequence
+
+When you power on or reset the NodeMCU:
+
+. `setup()` runs
+.. `Serial.begin(115200)` — opens Serial Monitor for debugging
+.. `connectWiFi()` — connects to the router
+.. `mqtt.setServer(...)` — points the MQTT library at Mosquitto
+.. `mqtt.setCallback(onMessage)` — registers the incoming command handler
+.. `connectMQTT()` — connects to broker, subscribes to `Control/Mode`
+
+. `loop()` starts running forever
+.. Every call: `mqtt.loop()` — keep-alive pings and receives commands
+.. Every 100 ms: read accel/gyro/hall, publish/buffer/accumulate
+.. Every 5000 ms (burst/average only): send collected data
+
+== Automatic Reconnection
+
+Both `connectWiFi()` and `connectMQTT()` are called at the start of every `loop()` cycle:
+
+[source,cpp]
+----
+void loop() {
+    if (!mqtt.connected()) connectMQTT();
+    mqtt.loop();
+    ...
+}
+----
+
+If the connection drops for any reason — router restart, PC sleep, anything — the ESP8266 reconnects automatically without any manual intervention. Once reconnected it subscribes to `Control/Mode` again and Mosquitto immediately delivers the retained mode message so it knows which mode to use.
+
+== Reading the Sensors
+
+=== MPU-6050 (I2C)
+
+[source,cpp]
+----
+void readAccel(float &x, float &y, float &z) {
+    int16_t ax, ay, az;
+    mpu.getAcceleration(&ax, &ay, &az);
+    x = ax / 16384.0;  // converts raw to g (+-2g range)
+    y = ay / 16384.0;
+    z = az / 16384.0;
+}
+----
+
+`mpu.getAcceleration()` talks to the MPU-6050 over I2C and returns raw 16-bit integers. Dividing by 16384 converts them to g-force units (where 1.0 = Earth gravity). The gyroscope works the same way — divide by 131 to get degrees per second.
+
+=== A3144 Hall Effect (Digital)
+
+[source,cpp]
+----
+void readHall(int &val) {
+    val = digitalRead(HALL_PIN);
+}
+----
+
+Returns either 1 (no magnet) or 0 (magnet detected).

@@ -1,0 +1,288 @@
+= LLM Use Case Specification
+:toc: left
+:toc-title: Contents
+:sectnums:
+:icons: font
+
+This document defines every query category the BioT Sensor Assistant must handle. It is the source of truth for what tools need to exist in the backend, what SQL the agent must generate, and what structured responses the Android app must be able to parse.
+
+Source of truth for the command set: `doc/content/command-dictionary.adoc`. The Android `VoiceCommandDictionary` is the keyword-based fast path; the LLM is the intelligent fallback for everything the dictionary cannot match.
+
+== How the LLM Differs from the Keyword Dictionary
+
+The Android `VoiceCommandDictionary` matches fixed keyword groups — fast, offline, deterministic. It handles simple one-shot commands like "zeige gyro", "stream modus", "supervision mode".
+
+The LLM handles everything the dictionary cannot:
+
+* Ambiguous or conversational phrasing ("what's been happening with the accelerometer today?")
+* Multi-part questions ("show me the last 10 minutes of gyro data and tell me if anything looks unusual")
+* Entity extraction ("set epsilon to 0.5 for gyro Y axis" — the dictionary recognises the intent but cannot extract sensor + axis + value)
+* Follow-up context ("what about the X axis specifically?")
+* Explanation requests ("why is the mic reading so high?")
+* Queries that require actual data analysis, not just navigation
+
+The keyword dictionary is the fast path. The LLM is the intelligent path.
+
+== JSON Response Schema
+
+This is the single source of truth for what `LlmAction.parse()` on the Android side accepts. If you change any field name here you must update `LlmAction` on the Android side.
+
+[source,json]
+----
+{
+  "action":  "answer | navigate | mqtt_publish | apply_filter | clear_filter",
+  "tts":     "Text to speak aloud via Android TtsManager (always present)",
+
+  // action = "navigate" only:
+  "screen":  "MainActivity | AccelActivity | GyroActivity | MagnetActivity | MainGraphActivity | EreignisActivity | SettingsActivity",
+
+  // action = "mqtt_publish" only:
+  "topic":   "Control/Mode | Control/OperatingMode",
+  "payload": "STREAM | BURST | AVERAGE | AUTARK | SUPERVISION | EVENT | IDENTIFICATION",
+
+  // action = "apply_filter" only:
+  "minutes": 10
+}
+----
+
+Parser tolerance on the Android side (`LlmAction.parse()`):
+
+* JSON wrapped in markdown fences (` ```json ... ``` `) is stripped
+* Plain prose with no JSON is treated as ANSWER with the prose as `tts`
+* Malformed JSON falls back to the ANSWER action
+* Unknown action types are treated as ANSWER (forward-compatible)
+* If `tts` is empty, the Android app speaks: "Sorry, I didn't catch that. Could you repeat your question?"
+
+== Category 1 — Sensor Data Queries
+
+=== UC-1.1 Latest reading for a sensor
+
+*Example phrases:* "Was ist der aktuelle Beschleunigungswert?", "What is the current accelerometer reading?", "Show me the latest gyro value"
+
+*Tool to call:* `get_latest_sensor_data(sensor)`
+
+[source,json]
+----
+{
+  "action": "answer",
+  "tts": "The latest accelerometer reading is X 0.12g, Y -0.04g, Z 9.81g, recorded 2 seconds ago."
+}
+----
+
+=== UC-1.1b Single axis value
+
+*Example phrases:* "Tell me the gyro X value", "Sage mir die Beschleunigung Z", "What is the magnet Y reading right now?"
+
+*Tool to call:* `get_value_for_axis(sensor, axis)`
+
+If no axis is given, fall back to UC-1.1.
+
+=== UC-1.2 Average over a time window
+
+*Tool to call:* `get_sensor_history(sensor, minutes)` — the history tool includes summary statistics.
+
+=== UC-1.3 Data over a time range
+
+*Tool to call:* `get_sensor_history(sensor, minutes)` for standard windows, `execute_query` for custom ranges.
+
+=== UC-1.4 Row count / data availability check
+
+*Tool to call:* `get_row_count(table)`
+
+=== UC-1.5 Database schema inspection
+
+*Tool to call:* `get_db_schema()`
+
+== Category 2 — Anomaly and Pattern Detection
+
+=== UC-2.1 Spike detection
+
+*Example phrases:* "Did the gyro spike recently?", "Were there any unusual accelerometer readings in the last 10 minutes?"
+
+*Tool to call:* `get_sensor_history(sensor, minutes)` — the summary statistics (min, max, std) let the LLM identify spikes.
+
+=== UC-2.2 Trend analysis
+
+*Tool to call:* `get_sensor_history(sensor, minutes)` with a longer window.
+
+=== UC-2.3 Event log queries
+
+*Example phrases:* "Show events", "Show events for accel", "Show notifications", "Were there any magnet events recently?"
+
+*Tool to call:* `get_event_log(limit)` and optionally `execute_query` for filtered queries.
+
+[source,json]
+----
+{
+  "action": "navigate",
+  "screen": "EreignisActivity",
+  "tts": "There are 3 events today. Latest was an ACCEL threshold crossing 12 minutes ago."
+}
+----
+
+== Category 3 — Mode Control
+
+NOTE: The system has two separate mode concepts on separate MQTT topics. Do not confuse them.
+
+=== UC-3.1 Switch transmission mode (Control/Mode)
+
+Controls how often the ESP8266 publishes readings: Stream (every reading), Burst (5-second batch), Average (rolling average every 5 seconds).
+
+*Example phrases:* "Switch to burst mode", "Aktiviere den Durchschnittsmodus"
+
+[source,json]
+----
+{
+  "action": "mqtt_publish",
+  "topic": "Control/Mode",
+  "payload": "BURST",
+  "tts": "Burst mode activated"
+}
+----
+
+=== UC-3.1b Switch operating mode (Control/OperatingMode)
+
+Controls what the ESP8266 is doing:
+
+* Autark — sensors stop sending data (power saving)
+* Supervision — sensors send all data, app shows homescreen
+* Event — sensors only send data when thresholds are crossed
+* Identification — sensors send all data, app forwards to database
+
+*Example phrases:* "Set mode to Supervision", "Wechsle in den Autark Modus"
+
+[source,json]
+----
+{
+  "action": "mqtt_publish",
+  "topic": "Control/OperatingMode",
+  "payload": "SUPERVISION",
+  "tts": "Supervision mode activated"
+}
+----
+
+=== UC-3.2 Get mode
+
+The current mode is not in the SQLite DB — it lives as a retained MQTT message that the Android app already displays in `ModeLabel` and `OperatingModeLabel`. The agent should respond with `action=answer` and tell the user to check those labels.
+
+== Category 4 — Navigation Commands
+
+=== UC-4.1 Navigate to a screen
+
+[options="header",cols="3,2,2"]
+|===
+| Phrase keywords | Target screen | Activity class
+| gyro, gyroskop, gyroscope | Gyroscope chart | `GyroActivity`
+| accel, beschleunigung, accelerometer | Accelerometer chart | `AccelActivity`
+| magnet, magnetfeld, hall | Magnetometer chart | `MagnetActivity`
+| graph, graphen, alle sensoren | Combined chart | `MainGraphActivity`
+| ereignis, events, notifications | Event log | `EreignisActivity`
+| einstellungen, settings | Settings | `SettingsActivity`
+| home, hauptseite, show all sensors | Main dashboard | `MainActivity`
+|===
+
+[source,json]
+----
+{ "action": "navigate", "screen": "GyroActivity", "tts": "Opening Gyroscope" }
+----
+
+== Category 5 — Time Filter Commands
+
+=== UC-5.1 Apply a time filter
+
+*Example phrases:* "Show the last 10 minutes", "Zeige die letzten 30 Minuten"
+
+[source,json]
+----
+{
+  "action": "apply_filter",
+  "minutes": 10,
+  "tts": "Showing the last ten minutes"
+}
+----
+
+=== UC-5.2 Clear filters
+
+[source,json]
+----
+{
+  "action": "clear_filter",
+  "tts": "Filter cleared"
+}
+----
+
+== Category 6 — System
+
+=== UC-6.1 Help
+
+Respond with a summary of what the agent can do — data queries, navigation, mode changes, filters.
+
+=== UC-6.3 Fallback for unknown intent
+
+When the user's intent is unparseable, the agent returns:
+
+[source,json]
+----
+{
+  "action": "answer",
+  "tts": "Sorry, I didn't catch that. Could you repeat your question?"
+}
+----
+
+The Android app speaks this via TtsManager whether the bad reply came from the network, a JSON parse error, or an explicit unknown intent from the LLM.
+
+== Category 7 — Calibration and Event Management (Planned)
+
+These commands are recognised by the voice dictionary and forwarded to the LLM but the underlying features are not yet implemented. The agent acknowledges politely and redirects.
+
+=== UC-7.1 Start calibration
+
+[source,json]
+----
+{
+  "action": "answer",
+  "tts": "Calibration is recognised but not yet implemented. We'll add it in a later milestone."
+}
+----
+
+=== UC-7.2 Set epsilon
+
+The agent tries to extract sensor + axis + value from the transcript, then navigates to SettingsActivity where the user can set it manually.
+
+[source,json]
+----
+{
+  "action": "navigate",
+  "screen": "SettingsActivity",
+  "tts": "Open Settings to adjust epsilon. Per-sensor and per-axis epsilon is not yet implemented."
+}
+----
+
+=== UC-7.3 Create event
+
+The agent tries to extract sensor + threshold, then navigates to EreignisActivity.
+
+[source,json]
+----
+{
+  "action": "navigate",
+  "screen": "EreignisActivity",
+  "tts": "Open the events screen to create a new threshold rule."
+}
+----
+
+== Tools Required in the Backend
+
+[options="header",cols="3,2,4"]
+|===
+| Tool | Relevant UCs | What it does
+| `get_latest_sensor_data(sensor)` | 1.1, 4.2 | Most recent row from one sensor table
+| `get_value_for_axis(sensor, axis)` | 1.1b | Most recent value for one axis
+| `get_sensor_history(sensor, minutes)` | 1.2, 1.3, 2.1, 2.2 | Time-windowed rows + min/max/avg/count summary stats
+| `get_db_schema()` | 1.5 | CREATE TABLE statements for all tables
+| `get_event_log(limit)` | 2.3 | Recent ereignis_data entries
+| `get_row_count(table)` | 1.4 | Per-table counts and latest timestamp
+| `execute_query(sql)` | 1.x complex | Read-only SELECT for ad-hoc queries
+|===
+
+All tools live in `mcp_server/sensor_mcp_server.py` and are exposed via the MCP HTTP transport on `MCP_SERVER_PORT` (default 8002).
