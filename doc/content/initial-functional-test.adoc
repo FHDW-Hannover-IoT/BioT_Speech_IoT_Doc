@@ -165,10 +165,65 @@ image::initialTest.png[]
 | Read operations (UI updates) and Write operations (DB batch inserts) do not cause database lock errors or deadlocks. The UI remains fully interactive while the background sync finishes.
 | [ ] Pass +
 [ ] Fail
+
+| **TC20**
+| **Local RAG Pipeline Evaluation**
+| Execute the predefined 10-question evaluation suite using the *Local RAG* configuration (local text embeddings + local vector database like ChromaDB). Document answer outputs and record execution latency (ms) per query.
+| The engine extracts local documentation chunks without network overhead. The response must fulfill the baseline quality criteria (Accuracy, Relevance, Informativeness). Out-of-scope questions (e.g., "What is today's date?") must be handled gracefully without hallucinations.
+| [ ] Pass +
+[ ] Fail
+
+| **TC20.1**
+| **Local RAG Pipeline Evaluation - Smartphone**
+| TC20 with Smartphone
+| Average latency must remain below the strict SLA threshold of **< 20 seconds**.
+| [ ] Pass +
+[ ] Fail
+
+| **TC20.1**
+| **Local RAG Pipeline Evaluation - Server**
+| TC20 with Server
+| Average latency must remain below the strict SLA threshold of **< 3.5 seconds**.
+| [ ] Pass +
+[ ] Fail
+
+| **TC21**
+| **Cloud API RAG Pipeline Evaluation**
+| Execute the identical 10-question evaluation suite using the *Cloud API RAG* configuration (OpenAI Vector Store Search + Multi-stage Query Expansion & Reranking). Document answer outputs and record latency (ms) per query.
+| The pipeline completes multi-stage API roundtrips successfully. Answers accurately reflect the manual's content. Despite advanced reasoning and query expansion overhead, the average latency must comply with the cloud SLA threshold of **< 4.5 seconds**.
+| [ ] Pass +
+[ ] Fail
+
+| **TC22**
+| **RAG Strategy Benchmark & Comparative Analysis**
+| Compare the evaluation metrics (Accuracy, Relevance, Informativeness, and Efficiency) of the local pipeline (TC20) against the cloud pipeline (TC21) based on the recorded test logs.
+| A direct trade-off analysis is documented. The Cloud API is expected to achieve higher score metrics in Relevance and Informativeness due to LLM-reranking capabilities, whereas the Local RAG must outperform the cloud engine significantly in the Efficiency metric (lower latency). Both variants must meet their respective timing SLAs.
+| [ ] Pass +
+[ ] Fail
+|===
+
+== RAG Evaluation Matrix & Query Suite
+
+Both RAG variants (Local and Cloud API) must be evaluated sequentially against the following standardized query catalog. Responses are graded based on **Accuracy** (correct facts, no hallucinations), **Relevance/Informativeness** (complete answers covering all technical steps), and **Efficiency** (execution time).
+
+[cols="5,25,15,15,20, 20,20", options="header"]
+|===
+| # | Test Question | Metric: Accuracy (Pass/Fail) | Metric: Relevance (Pass/Fail) | Local RAG Smartphone Latency (Target: < 20s) | Local RAG Server Latency (Target: < 3.5s) | Cloud API Latency (Target: < 4.5s)
+
+| 1 | How do I view sensor data? | | | | |
+| 2 | How can I define events? | | | | |
+| 3 | What types of events are there? | | | | |
+| 4 | What is today's date? | | | | |
+| 5 | How do I turn off the system? | | | | |
+| 6 | How do I display a specific axis on the screen? | | | | |
+| 7 | How do I select a specific axis from the gyro sensor? | | | | |
+| 8 | How can I view the events? | | | | |
+| 9 | How do I start calibration? | | | | |
+| 10 | What does “Get Mode” mean? | | | | |
 |===
 
 == Focus
 
-* **System: ** TC1, TC2, TC7, TC12
-* **App: ** TC3, TC4, TC5, TC6, TC8, TC9, TC10, TC11, TC12, TC13, TC14, TC15
-* **Server: ** TC5, TC12, TC13, TC15
+* **System:** TC1, TC2, TC7, TC12, TC20, TC21, TC22
+* **App:** TC3, TC4, TC5, TC6, TC8, TC9, TC10, TC11, TC12, TC13, TC14, TC15, TC16, TC17, TC18, TC19, TC20, TC21
+* **Server:** TC5, TC12, TC13, TC15, TC18, TC21, TC22
